@@ -71,14 +71,27 @@ jobs:
 
       # The release number comes from the tags, not from a commit back to main.
       # VERSION in the tree is a FLOOR; this run releases patch+1 of
-      # max(VERSION, newest v* tag).
-      - name: Resolve release base from tags
+      # max(VERSION, newest v* tag, newest release on Clojars). Clojars is
+      # consulted because a published pom is immutable: if a run deployed but
+      # died before pushing its tag, the next run must not mint that version
+      # again. Only a 404 (never published) counts as no version; any other
+      # answer stops the run rather than guess a base that may be too low.
+      - name: Resolve release base from tags and Clojars
         run: |
           set -euo pipefail
           FLOOR=$(tr -d '[:space:]' < VERSION)
           LAST=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 | sed 's/^v//')
-          BASE=$(printf '%s\n%s\n' "$FLOOR" "${LAST:-$FLOOR}" | sort -V | tail -n1)
-          echo "VERSION floor $FLOOR, newest tag ${LAST:-none}: base $BASE"
+          CODE=$(curl -sS --max-time 20 --retry 3 -o "$RUNNER_TEMP/clojars.json" \
+            -w '%{http_code}' \
+            https://clojars.org/api/artifacts/io.github.buddhilw/grammar || true)
+          case "$CODE" in
+            200) PUBLISHED=$(jq -er '.latest_release' "$RUNNER_TEMP/clojars.json") ;;
+            404) PUBLISHED= ;;
+            *)   echo "Clojars API answered '${CODE:-nothing}'; refusing to guess the release base" >&2
+                 exit 1 ;;
+          esac
+          BASE=$(printf '%s\n%s\n%s\n' "$FLOOR" "${LAST:-$FLOOR}" "${PUBLISHED:-$FLOOR}" | sort -V | tail -n1)
+          echo "VERSION floor $FLOOR, newest tag ${LAST:-none}, on Clojars ${PUBLISHED:-none}: base $BASE"
           printf '%s\n' "$BASE" > VERSION
 
       - name: Bump patch version
@@ -87,17 +100,9 @@ jobs:
       - name: Regenerate changelog
         run: clojure -T:build changelog
 
-      - name: Tag
-        run: |
-          set -euo pipefail
-          VER=$(tr -d '[:space:]' < VERSION)
-          git config user.name  "grammar-ci"
-          git config user.email "ci@users.noreply.github.com"
-          # Tag only, no commit back to main. Annotated, so the next run's tag
-          # scan and `git describe` see it.
-          git tag -a "v$VER" -m "release $VER"
-          git push origin "refs/tags/v$VER"
-
+      # Deploy BEFORE tagging. A tag is the record that a version shipped; a
+      # tag pushed ahead of a failed deploy is an orphan that makes the next
+      # run skip a version number.
       - name: Deploy
         env:
           # deps-deploy and hive-build read CLOJARS_PASSWORD; the secret holds a
@@ -105,3 +110,44 @@ jobs:
           CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
         run: clojure -T:build deploy
+
+      # deploy is a no-op for a coordinate the registry already holds, and a
+      # green step is not proof of an upload: assert the effect before the tag
+      # claims it.
+      - name: Verify published
+        run: clojure -T:build verify-published
+
+      - name: Tag
+        run: |
+          set -euo pipefail
+          VER=$(tr -d '[:space:]' < VERSION)
+          # deploy builds the jar only when it uploads. No jar means the
+          # coordinate was already on Clojars from another commit, so this
+          # commit must not take the tag.
+          test -f "target/grammar-$VER.jar" || {
+            echo "deploy uploaded nothing: $VER is already on Clojars; no tag" >&2
+            exit 1
+          }
+          git config user.name  "grammar-ci"
+          git config user.email "ci@users.noreply.github.com"
+          # Tag only, no commit back to main. Annotated, so the next run's tag
+          # scan and `git describe` see it.
+          git tag -a "v$VER" -m "release $VER"
+          git push origin "refs/tags/v$VER"
+
+      # The GitHub release carries this version's CHANGELOG.md section (the
+      # file is regenerated above and never committed) and the deployed jar.
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VER=$(tr -d '[:space:]' < VERSION)
+          awk -v head="## [$VER]" '
+            index($0, "## [") == 1 { if (on) exit; on = (index($0, head) == 1); next }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md || echo "Release $VER." > release-notes.md
+          cat release-notes.md
+          gh release create "v$VER" --verify-tag --title "v$VER" \
+            --notes-file release-notes.md target/grammar-"$VER".jar
