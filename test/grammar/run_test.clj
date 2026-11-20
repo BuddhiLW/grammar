@@ -12,7 +12,8 @@
             [grammar.probe :as probe]
             [grammar.profile :as p]
             [grammar.roundtrip-test :as rtt]
-            [grammar.schema :as s]))
+            [grammar.schema :as s]
+            [grammar.runtime]))
 
 (def echo-argv
   "python3 -c program printing its arguments NUL-separated."
@@ -70,4 +71,14 @@
     (testing "a builtin is not a program on PATH"
       (let [rt (fx/sh-runtime! :run-bare :dash [])
             after (g/resolve! rt (g/discover! rt) [:bin/printf])]
-        (is (= :no (p/verdict after :bin/printf)))))))
+        (is (= :no (p/verdict after :bin/printf)))))
+    (testing "a builtin does not hide the executable of the same name on PATH"
+      (let [rt (grammar.runtime/process-runtime {:id :run-usr :argv ["/usr/bin/dash" "-c"]
+                                                 :env {"PATH" "/usr/bin:/bin" "LC_ALL" "C.UTF-8"}})
+            after (g/resolve! rt (g/discover! rt) [:bin/printf :bin/tee])]
+        (is (= :yes (p/verdict after :bin/printf)))))
+    (testing "an absolute program is checked as a file"
+      (let [rt (fx/sh-runtime! :run-abs :dash [])
+            after (g/resolve! rt (g/discover! rt) [(keyword "bin" "/usr/bin/dash") (keyword "bin" "/nope/x")])]
+        (is (= :yes (p/verdict after (keyword "bin" "/usr/bin/dash"))))
+        (is (= :no (p/verdict after (keyword "bin" "/nope/x"))))))))

@@ -97,17 +97,26 @@
   ([runtime-id run! probes]
    (reduce (partial step runtime-id run!) (p/empty-profile runtime-id) probes)))
 
+(defn- sh-path-search
+  "sh script printing ok when quoted program q names an executable file:
+  the file itself when it holds a slash, else a PATH entry. Builtins and
+  functions are not consulted, so the answer matches exec, not the shell."
+  [prog q]
+  (if (str/includes? prog "/")
+    (str "if [ -f " q " ] && [ -x " q " ]; then printf %s ok; else printf %s no; fi")
+    (str "r=no; IFS=:; for d in $PATH; do if [ -f \"$d/\"" q " ] && [ -x \"$d/\"" q " ]; then r=ok; fi; done; printf %s \"$r\"")))
+
 (defn on-demand
   "Probe for a capability the fixed catalog cannot list ahead of time, in
-  the runtime's language, or nil. :bin/<program> holds when program
-  resolves to an executable file on PATH (a builtin does not count)."
+  the runtime's language, or nil. :bin/<program> holds when program names
+  an executable file on PATH (or is one, when it holds a slash)."
   [lang cap]
   (when (= "bin" (namespace cap))
     (let [prog (name cap)]
       (case lang
         :sh (when-let [q (lit/sh-single prog)]
-              {:cap cap :needs [:sh/printf :sh/single-quote]
-               :script (str "case $(command -v " q ") in */*) printf %s ok;; *) printf %s no;; esac")
+              {:cap cap :needs [:sh/printf :sh/single-quote :sh/double-quote]
+               :script (sh-path-search prog q)
                :expect "ok"})
         :python {:cap cap :needs []
                  :script (str "import shutil,sys;sys.stdout.write('ok' if shutil.which("
