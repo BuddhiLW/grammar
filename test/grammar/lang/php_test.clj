@@ -42,7 +42,7 @@
   ([profile intent] (plan profile intent {}))
   ([profile intent opts] (solve/solve (env profile) :sh intent opts)))
 
-(defn run! [runtime res]
+(defn exec! [runtime res]
   (let [r (rt/execute runtime (:code res))]
     (assoc res :execution (select-keys r [:exit :err :error])
            :verified (g/verify (:intent res) r))))
@@ -107,7 +107,7 @@
 (deftest encoder-shapes
   (is (nil? (php/php-single "a\u0000b")) "an argv word cannot carry NUL")
   (is (= "'\\\\\\''" (php/php-single "\\'")))
-  (is (= "'$x\\n\"'" (php/php-single "$x\\n\"")) "only \\ and ' are escaped")
+  (is (= "'$x\n\"\t'" (php/php-single "$x\n\"\t")) "$, \", newline and tab stay literal")
   (doseq [s ["" "it's" "\"\\" "λ🚀\u0000"]]
     (is (not-any? #(str/includes? (php/php-chr s) %) ["'" "\"" "$" "`" "\\"]))))
 
@@ -120,7 +120,7 @@
 (defspec php-stacks-roundtrip 100
   (prop/for-all [stack gen-php-stack
                  s rtt/gen-text]
-    (let [res (run! (:full @rts) (plan @full-profile [:str s] {:stack stack}))]
+    (let [res (exec! (:full @rts) (plan @full-profile [:str s] {:stack stack}))]
       (and (= :ok (:status res))
            (= stack (:stack res))
            (true? (:ok? (:verified res)))))))
@@ -130,7 +130,7 @@
                  [:sh :sh :php :sh] [:sh :php :python :php]]
           s ["" "'" "'\\''\"$`\\" "%s%%-n\n\n" "<?php ?>" "λ🚀\u0001\u007f"]]
     (testing (pr-str stack s)
-      (let [res (run! (:full @rts) (plan @full-profile [:str s] {:stack stack}))]
+      (let [res (exec! (:full @rts) (plan @full-profile [:str s] {:stack stack}))]
         (is (= :ok (:status res)))
         (is (= stack (:stack res)))
         (is (true? (:ok? (:verified res))) (pr-str (:code res) (:execution res)))))))
@@ -141,12 +141,12 @@
       (is (= [:ctx/sh->php :php.str/fwrite :php.lit/single :sh.lit/single] (:realization res)))
       (is (some #{:php.fn/fwrite} (get-in res [:constraints :requires])))))
   (testing "NUL: only chr can carry it inside php"
-    (let [res (run! (:full @rts) (plan @full-profile [:str "a\u0000b"] {:stack [:sh :php]}))]
+    (let [res (exec! (:full @rts) (plan @full-profile [:str "a\u0000b"] {:stack [:sh :php]}))]
       (is (= :php.lit/chr (nth (:realization res) 2)))
       (is (true? (:ok? (:verified res))))))
   (testing "no quote characters allowed: the chr form, through a double-quoted sh word"
     (let [prof (p/declare-text @full-profile :forbid #{"'"} "test: no single quotes")
-          res (run! (:full @rts) (plan prof [:str "it's \"x\" $HOME\n"] {:stack [:sh :php]}))]
+          res (exec! (:full @rts) (plan prof [:str "it's \"x\" $HOME\n"] {:stack [:sh :php]}))]
       (is (= :ok (:status res)))
       (is (= :php.lit/chr (nth (:realization res) 2)))
       (is (not (str/includes? (:code res) "'")))
@@ -182,7 +182,7 @@
                               "skipped"))))
     (testing "fwrite disabled: :str falls back to echo, a language construct"
       (let [rtm (runtime! :php-nofwrite2 :dash [:sh] #{"fwrite"})
-            res (run! rtm (plan (discover rtm) [:str "it's\n"] {:stack [:sh :php]}))]
+            res (exec! rtm (plan (discover rtm) [:str "it's\n"] {:stack [:sh :php]}))]
         (is (= :php.str/echo (second (:realization res))))
         (is (true? (:ok? (:verified res))))))))
 
@@ -206,7 +206,7 @@
         write (fn [id prof c]
                 (let [res (plan prof [:write-file {:path (str out "/" (name id) " " (hash c) ".txt")
                                                    :content c}])]
-                  (if (= :ok (:status res)) (run! (rts id) res) res)))
+                  (if (= :ok (:status res)) (exec! (rts id) res) res)))
         results (into (sorted-map) (for [[id] restrictions] [id (write id (profs id) content)]))
         via (fn [id] (:realization (results id)))]
 
