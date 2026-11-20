@@ -31,13 +31,45 @@ io.github.buddhilw/grammar {:mvn/version "0.1.1"}
 | `grammar.solve`    | pure      | deterministic search, text constraints, explanations |
 | `grammar.probe`    | pure      | discovery laws as scripts; verdicts from observed runs |
 | `grammar.runtime`  | boundary  | `IRuntime` port + `ProcessRuntime` adapter |
-| `grammar.core`     | facade    | `discover!`, `plan`, `realize!`, `verify` |
+| `grammar.core`     | facade    | `discover!`, `plan`, `realize!`, `verify`, `effect` |
 
 ## Intents
 
 - `[:str s]`: emit exactly the bytes of `s` on stdout. Proves literal correctness.
 - `[:write-file {:path p :content c}]`: `p` holds exactly `c`. Proves planning,
   rendering, execution and verification together.
+- `[:run {:argv ["prog" "arg" ...]}]`: execute `prog` with each argv element as
+  exactly one word (no NUL, which no argv can carry). The program is a
+  capability resolved on demand: plain planning returns `:blocked-on-unknown`
+  with `:needs [:sh.cmd/prog]`; `realize!` with `{:resolve true}` (or
+  `plan-resolving!`) probes it in the runtime, records the evidence and plans
+  again. Verified by exit status 0.
+- `[:ensure-dir {:path p}]`: `p` is a directory (parents created, idempotent).
+  `mkdir -p --` when the shell has `mkdir`, else python `pathlib` through a
+  context wrapper.
+- `[:remove-file {:path p}]`: `p` is not a file (absent is fine). `rm -f --`
+  or python `pathlib.unlink(missing_ok=True)`.
+
+`(grammar.core/effect intent)` observes, with no run, whether a state intent
+(`:write-file`, `:ensure-dir`, `:remove-file`) already holds:
+`{:check kw :holds? bool}`, or `nil` for `:str` and `:run`. A caller can skip
+work that is already done. `verify` is that same observation after a run,
+plus exit status 0. Both read the local filesystem, so they only apply to a
+runtime that shares it.
+
+## On-demand capabilities
+
+The fixed probe catalog covers the shell's grammar. Capabilities that depend
+on the intent are probed when a plan needs them:
+
+| Capability       | Holds when                                              | Needed by |
+|------------------|---------------------------------------------------------|-----------|
+| `:sh.cmd/<prog>` | the shell resolves the word (`command -v`): PATH, builtins, busybox applets | sh simple commands |
+| `:bin/<prog>`    | exec finds an executable file on PATH (`[ -f ] && [ -x ]`, `shutil.which`) | python `subprocess` |
+
+`grammar.probe/on-demand` gives the probe for a language, `grammar.core/resolve!`
+runs it. A realization adds intent-dependent requirements through
+`:requires-of (fn [intent] caps)`.
 
 ## Capabilities are tri-state
 

@@ -21,10 +21,32 @@
   [:tuple [:= :write-file]
    [:map {:closed true} [:path :string] [:content :string]]])
 
+(def ArgvWord
+  "An exec argument: any string without NUL, which no argv entry can hold."
+  [:and :string [:fn {:error/message "argv words cannot contain NUL"}
+                 #(not (.contains ^String % "\u0000"))]])
+
+(def Run
+  [:tuple [:= :run]
+   [:map {:closed true} [:argv [:vector {:min 1} ArgvWord]]]])
+
+(def PathArg
+  "A filesystem path an operation acts on: non-empty, no NUL."
+  [:and ArgvWord [:string {:min 1}]])
+
+(def EnsureDir
+  [:tuple [:= :ensure-dir] [:map {:closed true} [:path PathArg]]])
+
+(def RemoveFile
+  [:tuple [:= :remove-file] [:map {:closed true} [:path PathArg]]])
+
 (def Intent
   [:multi {:dispatch first}
    [:str Str]
-   [:write-file WriteFile]])
+   [:write-file WriteFile]
+   [:run Run]
+   [:ensure-dir EnsureDir]
+   [:remove-file RemoveFile]])
 
 (def Verdict [:enum :yes :no :unknown])
 
