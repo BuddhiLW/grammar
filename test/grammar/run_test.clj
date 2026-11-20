@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.run-test
   "Acceptance for [:run {:argv [...]}]: every argv element reaches the
   program as exactly one word, through any context stack, and the program

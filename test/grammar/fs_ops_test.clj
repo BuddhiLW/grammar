@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.fs-ops-test
   "Acceptance for :ensure-dir and :remove-file: one intent, the program the
   runtime can actually run. coreutils when they are on PATH, python pathlib
