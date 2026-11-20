@@ -108,21 +108,27 @@
 
 (defn on-demand
   "Probe for a capability the fixed catalog cannot list ahead of time, in
-  the runtime's language, or nil. :bin/<program> holds when program names
-  an executable file on PATH (or is one, when it holds a slash)."
+  the runtime's language, or nil.
+    :bin/<prog>     exec finds prog: an executable file on PATH (or prog
+                    itself when it holds a slash). Builtins do not count.
+    :sh.cmd/<prog>  the shell resolves the word prog (command -v): PATH,
+                    builtins and applets all count. sh runtimes only."
   [lang cap]
-  (when (= "bin" (namespace cap))
-    (let [prog (name cap)]
-      (case lang
-        :sh (when-let [q (lit/sh-single prog)]
-              {:cap cap :needs [:sh/printf :sh/single-quote :sh/double-quote]
-               :script (sh-path-search prog q)
-               :expect "ok"})
-        :python {:cap cap :needs []
-                 :script (str "import shutil,sys;sys.stdout.write('ok' if shutil.which("
-                              (lit/py-single prog) ") else 'no')")
-                 :expect "ok"}
-        nil))))
+  (let [prog (name cap)]
+    (case [(namespace cap) lang]
+      ["bin" :sh] (when-let [q (lit/sh-single prog)]
+                    {:cap cap :needs [:sh/printf :sh/single-quote :sh/double-quote]
+                     :script (sh-path-search prog q)
+                     :expect "ok"})
+      ["bin" :python] {:cap cap :needs []
+                       :script (str "import shutil,sys;sys.stdout.write('ok' if shutil.which("
+                                    (lit/py-single prog) ") else 'no')")
+                       :expect "ok"}
+      ["sh.cmd" :sh] (when-let [q (lit/sh-single prog)]
+                       {:cap cap :needs [:sh/printf :sh/single-quote]
+                        :script (str "case $(command -v " q ") in '') printf %s no;; *) printf %s ok;; esac")
+                        :expect "ok"})
+      nil)))
 
 (defn resolve-caps
   "Probe every cap in caps that is still :unknown and has an on-demand probe

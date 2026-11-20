@@ -24,7 +24,7 @@
 
 (def ^:private dash
   (delay (let [rt (fx/sh-runtime! :run-dash :dash [:sh :python3])]
-           {:rt rt :prof (g/resolve! rt (g/discover! rt) [:bin/python3])})))
+           {:rt rt :prof (g/resolve! rt (g/discover! rt) [:bin/python3 :sh.cmd/python3])})))
 
 (defspec argv-words-roundtrip-through-stacks 60
   (prop/for-all [args (gen/vector rtt/gen-text 0 4)
@@ -45,13 +45,13 @@
         (testing "plain planning never assumes the program exists"
           (let [res (g/plan prof :sh intent)]
             (is (= :blocked-on-unknown (:status res)))
-            (is (= [:bin/python3] (:needs res)))))
+            (is (= [:sh.cmd/python3] (:needs res)))))
         (testing "resolving probes it once, with traceable evidence"
           (let [res (g/realize! rt prof intent {:resolve true})
                 after (:profile-after res)
-                ev (get-in after [:evidence (probe/evidence-id id :bin/python3)])]
+                ev (get-in after [:evidence (probe/evidence-id id :sh.cmd/python3)])]
             (is (s/result? (dissoc res :runtime :profile-after :execution :verified)))
-            (is (= (if has-python? :yes :no) (p/verdict after :bin/python3)))
+            (is (= (if has-python? :yes :no) (p/verdict after :sh.cmd/python3)))
             (is (= :probe (:kind ev)))
             (is (int? (:exit ev)))
             (if has-python?
@@ -68,10 +68,16 @@
         (is (= :invalid (:status (g/plan prof :sh (echo-intent ["a\u0000b"]) {:stack stack}))))))
     (testing "empty argv is not an intent"
       (is (= :invalid (:status (g/plan prof :sh [:run {:argv []}])))))
-    (testing "a builtin is not a program on PATH"
+    (testing "a builtin is a shell command, but not a program on PATH"
       (let [rt (fx/sh-runtime! :run-bare :dash [])
-            after (g/resolve! rt (g/discover! rt) [:bin/printf])]
-        (is (= :no (p/verdict after :bin/printf)))))
+            after (g/resolve! rt (g/discover! rt) [:bin/printf :sh.cmd/printf])]
+        (is (= :no (p/verdict after :bin/printf)))
+        (is (= :yes (p/verdict after :sh.cmd/printf)))))
+    (testing "python subprocess needs the PATH program, sh only the command word"
+      (let [rt (fx/sh-runtime! :run-bare2 :dash [])
+            prof (g/resolve! rt (g/discover! rt) [:bin/printf :sh.cmd/printf])]
+        (is (= :ok (:status (g/plan prof :sh [:run {:argv ["printf" "x"]}]))))
+        (is (= :unsatisfiable (:status (g/plan prof :sh [:run {:argv ["printf" "x"]}] {:stack [:sh :python]}))))))
     (testing "a builtin does not hide the executable of the same name on PATH"
       (let [rt (grammar.runtime/process-runtime {:id :run-usr :argv ["/usr/bin/dash" "-c"]
                                                  :env {"PATH" "/usr/bin:/bin" "LC_ALL" "C.UTF-8"}})

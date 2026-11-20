@@ -24,11 +24,23 @@
 (defn- leaf-lit [encode] (fn [_ [_ s]] (c/leaf (encode s))))
 
 (defn bin-cap
-  "Capability: program name resolves to an executable on the runtime's PATH."
+  "Capability: exec finds program as an executable file on PATH (what
+  python's subprocess needs)."
   [program]
   (keyword "bin" program))
 
-(defn- run-requires [[_ {:keys [argv]}]] #{(bin-cap (first argv))})
+(defn cmd-cap
+  "Capability: the shell resolves program as a command word, builtins and
+  applets included (what an sh simple command needs)."
+  [program]
+  (keyword "sh.cmd" program))
+
+(defn- program [[_ {:keys [argv]}]] (first argv))
+
+(defn- sh-words
+  "Candidates for one simple command: each element of words one literal word."
+  [env words]
+  (apply c/combine (fn [& ws] (str/join " " ws)) (map #(lit-in env :sh %) words)))
 
 (def realizations
   [;; ------------------------------------------------ literals: sh
@@ -89,17 +101,35 @@
 
    ;; ------------------------------------------------ :run  (exec argv, every word literal)
    {:id :sh.run/words :intent :run :lang :sh :cost 1
-    :requires #{} :requires-of run-requires
+    :requires #{} :requires-of #(hash-set (cmd-cap (program %)))
     :doc "One simple command; each argv element is one quoted word."
-    :render (fn [env [_ {:keys [argv]}]]
-              (apply c/combine (fn [& ws] (str/join " " ws))
-                     (map #(lit-in env :sh %) argv)))}
+    :render (fn [env [_ {:keys [argv]}]] (sh-words env argv))}
    {:id :py.run/subprocess :intent :run :lang :python :cost 1
-    :requires #{:py/subprocess} :requires-of run-requires
+    :requires #{:py/subprocess} :requires-of #(hash-set (bin-cap (program %)))
     :render (fn [env [_ {:keys [argv]}]]
               (apply c/combine
                      (fn [& ws] (str "import subprocess,sys;sys.exit(subprocess.call([" (str/join "," ws) "]))"))
-                     (map #(lit-in env :python %) argv)))}])
+                     (map #(lit-in env :python %) argv)))}
+
+   ;; ------------------------------------------------ :ensure-dir  (path is a directory, parents too)
+   {:id :sh.ensure-dir/mkdir :intent :ensure-dir :lang :sh :cost 1
+    :requires #{:sh.cmd/mkdir}
+    :render (fn [env [_ {:keys [path]}]] (sh-words env ["mkdir" "-p" "--" path]))}
+   {:id :py.ensure-dir/pathlib :intent :ensure-dir :lang :python :cost 1
+    :requires #{:py/pathlib}
+    :render (fn [env [_ {:keys [path]}]]
+              (c/combine #(str "import pathlib;pathlib.Path(" % ").mkdir(parents=True,exist_ok=True)")
+                         (lit-in env :python path)))}
+
+   ;; ------------------------------------------------ :remove-file  (path no longer exists as a file)
+   {:id :sh.remove-file/rm :intent :remove-file :lang :sh :cost 1
+    :requires #{:sh.cmd/rm}
+    :render (fn [env [_ {:keys [path]}]] (sh-words env ["rm" "-f" "--" path]))}
+   {:id :py.remove-file/pathlib :intent :remove-file :lang :python :cost 1
+    :requires #{:py/pathlib}
+    :render (fn [env [_ {:keys [path]}]]
+              (c/combine #(str "import pathlib;pathlib.Path(" % ").unlink(missing_ok=True)")
+                         (lit-in env :python path)))}])
 
 (def wrappers
   [{:id :ctx/sh->sh :outer :sh :inner :sh :cost 5

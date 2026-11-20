@@ -23,7 +23,9 @@
   "Tool name -> host binary the scratch bin dir links to."
   {:sh "/usr/bin/dash"
    :tee (which "tee")
-   :python3 (which "python3")})
+   :python3 (which "python3")
+   :mkdir (which "mkdir")
+   :rm (which "rm")})
 
 (defn tmp-dir! [prefix]
   (str (Files/createTempDirectory prefix (make-array FileAttribute 0))))

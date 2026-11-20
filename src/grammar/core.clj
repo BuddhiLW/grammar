@@ -53,7 +53,11 @@
                               (Arrays/equals (utf8 (:content arg)) ^bytes actual))]
                   {:check :file-bytes :exit (:exit run) :ok? ok
                    :bytes (when actual (alength ^bytes actual))})
-    :run {:check :exit-zero :exit (:exit run) :ok? (= 0 (:exit run))}))
+    :run {:check :exit-zero :exit (:exit run) :ok? (= 0 (:exit run))}
+    :ensure-dir {:check :is-directory :exit (:exit run)
+                 :ok? (and (= 0 (:exit run)) (.isDirectory (File. ^String (:path arg))))}
+    :remove-file {:check :file-absent :exit (:exit run)
+                  :ok? (and (= 0 (:exit run)) (not (.isFile (File. ^String (:path arg)))))}))
 
 (defn resolve!
   "Probe, in runtime, every cap in caps that is still :unknown and has an

@@ -40,15 +40,26 @@ io.github.buddhilw/grammar {:mvn/version "0.1.1"}
   rendering, execution and verification together.
 - `[:run {:argv ["prog" "arg" ...]}]`: execute `prog` with each argv element as
   exactly one word (no NUL, which no argv can carry). The program is a
-  capability, `:bin/prog`, resolved on demand: plain planning returns
-  `:blocked-on-unknown` with `:needs [:bin/prog]`; `realize!` with
-  `{:resolve true}` (or `plan-resolving!`) probes it in the runtime, records
-  the evidence and plans again. Verified by exit status 0.
+  capability resolved on demand: plain planning returns `:blocked-on-unknown`
+  with `:needs [:sh.cmd/prog]`; `realize!` with `{:resolve true}` (or
+  `plan-resolving!`) probes it in the runtime, records the evidence and plans
+  again. Verified by exit status 0.
+- `[:ensure-dir {:path p}]`: `p` is a directory (parents created, idempotent).
+  `mkdir -p --` when the shell has `mkdir`, else python `pathlib` through a
+  context wrapper.
+- `[:remove-file {:path p}]`: `p` is not a file (absent is fine). `rm -f --`
+  or python `pathlib.unlink(missing_ok=True)`.
 
 ## On-demand capabilities
 
 The fixed probe catalog covers the shell's grammar. Capabilities that depend
-on the intent (`:bin/<program>`) are probed when a plan needs them:
+on the intent are probed when a plan needs them:
+
+| Capability       | Holds when                                              | Needed by |
+|------------------|---------------------------------------------------------|-----------|
+| `:sh.cmd/<prog>` | the shell resolves the word (`command -v`): PATH, builtins, busybox applets | sh simple commands |
+| `:bin/<prog>`    | exec finds an executable file on PATH (`[ -f ] && [ -x ]`, `shutil.which`) | python `subprocess` |
+
 `grammar.probe/on-demand` gives the probe for a language, `grammar.core/resolve!`
 runs it. A realization adds intent-dependent requirements through
 `:requires-of (fn [intent] caps)`.
