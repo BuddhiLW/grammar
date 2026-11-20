@@ -31,7 +31,7 @@ io.github.buddhilw/grammar {:mvn/version "0.1.1"}
 | `grammar.solve`    | pure      | deterministic search, text constraints, explanations |
 | `grammar.probe`    | pure      | discovery laws as scripts; verdicts from observed runs |
 | `grammar.runtime`  | boundary  | `IRuntime` port + `ProcessRuntime` adapter |
-| `grammar.core`     | facade    | `discover!`, `plan`, `realize!`, `verify` |
+| `grammar.core`     | facade    | `discover!`, `plan`, `realize!`, `verify`, `effect` |
 
 ## Intents
 
@@ -49,6 +49,13 @@ io.github.buddhilw/grammar {:mvn/version "0.1.1"}
   context wrapper.
 - `[:remove-file {:path p}]`: `p` is not a file (absent is fine). `rm -f --`
   or python `pathlib.unlink(missing_ok=True)`.
+
+`(grammar.core/effect intent)` observes, with no run, whether a state intent
+(`:write-file`, `:ensure-dir`, `:remove-file`) already holds:
+`{:check kw :holds? bool}`, or `nil` for `:str` and `:run`. A caller can skip
+work that is already done. `verify` is that same observation after a run,
+plus exit status 0. Both read the local filesystem, so they only apply to a
+runtime that shares it.
 
 ## On-demand capabilities
 

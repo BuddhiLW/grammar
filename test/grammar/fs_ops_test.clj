@@ -50,3 +50,30 @@
     (testing "a leading dash is a path, not an option"
       (let [res (g/plan prof :sh [:ensure-dir {:path "-p"}])]
         (is (= "'mkdir' '-p' '--' '-p'" (:code res)))))))
+
+(deftest effect-observed-without-a-run
+  (let [out (fx/tmp-dir! "grammar-effect-")
+        dir (str out "/d")
+        file (str out "/f.txt")
+        rt (fx/sh-runtime! :effect :dash [:mkdir :rm])
+        prof (g/resolve! rt (g/discover! rt) [:sh.cmd/mkdir :sh.cmd/rm])
+        holds? #(:holds? (g/effect %))]
+    (testing "state intents report whether their state already holds"
+      (is (false? (holds? [:ensure-dir {:path dir}])))
+      (g/realize! rt prof [:ensure-dir {:path dir}])
+      (is (true? (holds? [:ensure-dir {:path dir}]))))
+    (testing ":write-file holds only for the exact bytes"
+      (is (false? (holds? [:write-file {:path file :content "a"}])))
+      (spit file "a\n")
+      (is (false? (holds? [:write-file {:path file :content "a"}])))
+      (is (true? (holds? [:write-file {:path file :content "a\n"}])))
+      (is (= 2 (:bytes (g/effect [:write-file {:path file :content "a"}])))))
+    (testing ":remove-file holds once the file is gone"
+      (is (false? (holds? [:remove-file {:path file}])))
+      (g/realize! rt prof [:remove-file {:path file}])
+      (is (true? (holds? [:remove-file {:path file}]))))
+    (testing "a directory is not a file to remove"
+      (is (true? (holds? [:remove-file {:path dir}]))))
+    (testing "output intents have no state to observe"
+      (is (nil? (g/effect [:run {:argv ["true"]}])))
+      (is (nil? (g/effect [:str "x"]))))))

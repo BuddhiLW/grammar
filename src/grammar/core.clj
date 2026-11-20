@@ -38,26 +38,37 @@
 
 (defn- utf8 ^bytes [^String s] (.getBytes s "UTF-8"))
 
+(defn effect
+  "Observe, with no run, whether the state that intent describes holds now:
+  {:check kw :holds? bool}. Defined for state intents (:write-file,
+  :ensure-dir, :remove-file); nil for :str and :run, whose effect exists only
+  as the output of a run. The observation reads this JVM's filesystem, so it
+  is only meaningful for a runtime that shares it."
+  [[op arg :as _intent]]
+  (case op
+    :write-file (let [f (File. ^String (:path arg))
+                      actual (when (.isFile f) (Files/readAllBytes (.toPath f)))]
+                  {:check :file-bytes
+                   :holds? (boolean (and (some? actual)
+                                         (Arrays/equals (utf8 (:content arg)) ^bytes actual)))
+                   :bytes (when actual (alength ^bytes actual))})
+    :ensure-dir {:check :is-directory :holds? (.isDirectory (File. ^String (:path arg)))}
+    :remove-file {:check :file-absent :holds? (not (.isFile (File. ^String (:path arg))))}
+    nil))
+
 (defn verify
-  "Check the observable effect of intent against what the run produced."
-  [[op arg :as _intent] run]
+  "Check the observable effect of intent against what the run produced. A
+  state intent verifies when the run exited 0 and its effect holds after it."
+  [[op arg :as intent] run]
   (case op
     :str (let [ok (and (= 0 (:exit run))
                        (some? (:out-bytes run))
                        (Arrays/equals (utf8 arg) ^bytes (:out-bytes run)))]
            {:check :stdout-bytes :exit (:exit run) :ok? ok})
-    :write-file (let [f (File. ^String (:path arg))
-                      actual (when (.isFile f) (Files/readAllBytes (.toPath f)))
-                      ok (and (= 0 (:exit run))
-                              (some? actual)
-                              (Arrays/equals (utf8 (:content arg)) ^bytes actual))]
-                  {:check :file-bytes :exit (:exit run) :ok? ok
-                   :bytes (when actual (alength ^bytes actual))})
     :run {:check :exit-zero :exit (:exit run) :ok? (= 0 (:exit run))}
-    :ensure-dir {:check :is-directory :exit (:exit run)
-                 :ok? (and (= 0 (:exit run)) (.isDirectory (File. ^String (:path arg))))}
-    :remove-file {:check :file-absent :exit (:exit run)
-                  :ok? (and (= 0 (:exit run)) (not (.isFile (File. ^String (:path arg)))))}))
+    (let [{:keys [holds?] :as e} (effect intent)]
+      (-> (dissoc e :holds?)
+          (assoc :exit (:exit run) :ok? (and (= 0 (:exit run)) holds?))))))
 
 (defn resolve!
   "Probe, in runtime, every cap in caps that is still :unknown and has an
