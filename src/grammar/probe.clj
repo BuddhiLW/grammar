@@ -1,0 +1,91 @@
+(ns grammar.probe
+  "Discovery. A probe is a law stated as a tiny script with an expected
+  stdout, run in the runtime under study.
+
+    printed exactly :expect           -> :yes  (law holds here)
+    ran, printed anything else        -> :no   (law refuted here)
+    never ran (launch error, timeout) -> :unknown
+    prerequisite (:needs) not :yes    -> :unknown, probe skipped
+
+  Every verdict becomes Evidence carrying the script, exit status and
+  output, so any later choice can be traced back to what was observed.
+  This namespace is pure: the runner is passed in."
+  (:require [clojure.string :as str]
+            [grammar.profile :as p]))
+
+(def probes
+  "Ordered so that every :needs is probed before the probes that rely on it.
+  Probe scripts avoid output redirection on purpose: a restricted shell
+  must still be able to answer every other question."
+  [{:cap :sh/printf       :needs []
+    :script "printf %s ok" :expect "ok"}
+   {:cap :sh/single-quote :needs [:sh/printf]
+    :script "printf %s 'o''k'" :expect "ok"}
+   {:cap :sh/double-quote :needs [:sh/printf]
+    :script "printf %s \"o\"\"k\"" :expect "ok"}
+   {:cap :sh/ansi-c-quote :needs [:sh/printf]
+    :script "printf %s $'\\157'k" :expect "ok"}
+   {:cap :sh/redirect     :needs [:sh/printf :sh/single-quote]
+    :script "eval ': >/dev/null' && printf %s ok" :expect "ok"}
+   {:cap :sh/pipe         :needs [:sh/printf :sh/single-quote]
+    :script "printf 'ok\\n' | { read -r x; printf %s \"$x\"; }" :expect "ok"}
+   {:cap :bin/tee         :needs [:sh/printf :sh/pipe]
+    :script "printf %s ok | tee" :expect "ok"}
+   {:cap :interp/sh       :needs [:sh/printf :sh/single-quote]
+    :script "sh -c 'printf %s ok'" :expect "ok"}
+   {:cap :interp/python3  :needs [:sh/single-quote]
+    :script "python3 -c 'print(\"ok\",end=\"\")'" :expect "ok"}
+   {:cap :py/sys          :needs [:interp/python3 :sh/single-quote]
+    :script "python3 -c 'import sys;sys.stdout.write(\"ok\")'" :expect "ok"}
+   {:cap :py/pathlib      :needs [:interp/python3 :sh/single-quote]
+    :script "python3 -c 'import pathlib,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
+   {:cap :py/subprocess   :needs [:interp/python3 :sh/single-quote]
+    :script "python3 -c 'import subprocess,sys;sys.stdout.write(\"ok\")'" :expect "ok"}])
+
+(defn judge
+  "Verdict of one probe run. A run that never happened proves nothing."
+  [{:keys [expect]} {:keys [out error]}]
+  (cond error :unknown
+        (= out expect) :yes
+        :else :no))
+
+(defn- clip [s] (when s (if (> (count s) 400) (str (subs s 0 400) "...") s)))
+
+(defn evidence-id [runtime-id cap]
+  (keyword (str "ev." (name runtime-id)) (str (namespace cap) "." (name cap))))
+
+(defn run-evidence
+  "Evidence for a probe that ran (or tried to)."
+  [runtime-id {:keys [cap script expect] :as probe} result]
+  (cond-> {:id (evidence-id runtime-id cap)
+           :kind :probe :cap cap :runtime runtime-id
+           :verdict (judge probe result)
+           :script script :expect expect
+           :exit (:exit result)}
+    (:argv result) (assoc :argv (vec (:argv result)))
+    (:out result) (assoc :out (clip (:out result)))
+    (:err result) (assoc :err (clip (:err result)))
+    (:error result) (assoc :error (:error result))))
+
+(defn skip-evidence
+  "Evidence for a probe not run because a prerequisite was not proven."
+  [runtime-id {:keys [cap script expect]} profile unproven]
+  {:id (evidence-id runtime-id cap)
+   :kind :probe :cap cap :runtime runtime-id :verdict :unknown
+   :script script :expect expect
+   :reason (str "skipped: prerequisite not proven: "
+                (str/join ", " (map #(str % "=" (name (p/verdict profile %))) unproven)))})
+
+(defn discover
+  "Run every probe through run! (fn [script] -> {:argv :exit :out :err} or
+  {:argv :error}), in order, folding the evidence into a fresh profile."
+  ([runtime-id run!] (discover runtime-id run! probes))
+  ([runtime-id run! probes]
+   (reduce (fn [profile {:keys [needs] :as probe}]
+             (let [unproven (vec (remove #(= :yes (p/verdict profile %)) needs))]
+               (p/add-evidence profile
+                               (if (seq unproven)
+                                 (skip-evidence runtime-id probe profile unproven)
+                                 (run-evidence runtime-id probe (run! (:script probe)))))))
+           (p/empty-profile runtime-id)
+           probes)))
