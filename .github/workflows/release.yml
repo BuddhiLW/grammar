@@ -1,0 +1,107 @@
+name: release
+
+# Patch-bump and publish to Clojars only when the push changes the library.
+# README / CI-only commits do not mint a version, because a published pom is
+# immutable. Derived from the hive-olympus release workflow; grammar adds
+# busybox (the suite runs real interpreters) and a strict licence gate.
+#
+# Secrets: CLOJARS_USERNAME, CLOJARS_DEPLOY_TOKEN.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'resources/**'
+      - 'deps.edn'
+      - 'VERSION'
+      - 'version.edn'
+      - 'LICENSE'
+      # The suite gates the bump/deploy below, so a test-only change must be
+      # able to trigger a run.
+      - 'test/**'
+      # A change to the release pipeline is exercised by the push that makes it.
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: m2-${{ runner.os }}-
+
+      # The suite drives real bash, bash -r, dash, busybox sh and python3.
+      - name: Interpreters
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox dash
+          for b in /usr/bin/bash /usr/bin/dash /usr/bin/busybox; do test -x "$b"; done
+          python3 --version
+
+      # Gate BEFORE the bump: a published pom is immutable, so a red suite must
+      # not be able to mint a version, tag it and ship it.
+      - name: Test
+        run: clojure -M:test
+
+      - name: Licence agreement (LICENSE, version.edn, SPDX headers)
+        run: clojure -T:build verify-license :strict true
+
+      # The release number comes from the tags, not from a commit back to main.
+      # VERSION in the tree is a FLOOR; this run releases patch+1 of
+      # max(VERSION, newest v* tag).
+      - name: Resolve release base from tags
+        run: |
+          set -euo pipefail
+          FLOOR=$(tr -d '[:space:]' < VERSION)
+          LAST=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n1 | sed 's/^v//')
+          BASE=$(printf '%s\n%s\n' "$FLOOR" "${LAST:-$FLOOR}" | sort -V | tail -n1)
+          echo "VERSION floor $FLOOR, newest tag ${LAST:-none}: base $BASE"
+          printf '%s\n' "$BASE" > VERSION
+
+      - name: Bump patch version
+        run: clojure -T:build bump :level :patch
+
+      - name: Regenerate changelog
+        run: clojure -T:build changelog
+
+      - name: Tag
+        run: |
+          set -euo pipefail
+          VER=$(tr -d '[:space:]' < VERSION)
+          git config user.name  "grammar-ci"
+          git config user.email "ci@users.noreply.github.com"
+          # Tag only, no commit back to main. Annotated, so the next run's tag
+          # scan and `git describe` see it.
+          git tag -a "v$VER" -m "release $VER"
+          git push origin "refs/tags/v$VER"
+
+      - name: Deploy
+        env:
+          # deps-deploy and hive-build read CLOJARS_PASSWORD; the secret holds a
+          # Clojars deploy token (the account password is refused).
+          CLOJARS_USERNAME: ${{ secrets.CLOJARS_USERNAME }}
+          CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
+        run: clojure -T:build deploy

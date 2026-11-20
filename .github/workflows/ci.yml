@@ -1,0 +1,64 @@
+name: ci
+
+# The suite on every pull request and on every push outside main. Never
+# publishes; main is released by release.yml.
+on:
+  pull_request:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: m2-${{ runner.os }}-
+
+      - name: Interpreters
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq busybox dash
+          for b in /usr/bin/bash /usr/bin/dash /usr/bin/busybox; do test -x "$b"; done
+          python3 --version
+
+      # The pins must resolve from the registries before anything else.
+      - name: Resolve declared classpath
+        run: clojure -P -M:test
+
+      - name: Test
+        run: clojure -M:test
+
+      - name: Licence agreement (LICENSE, version.edn, SPDX headers)
+        run: clojure -T:build verify-license :strict true
+
+      - name: Jar builds and carries the sources
+        run: |
+          set -euo pipefail
+          clojure -T:build jar
+          jar=$(ls target/*.jar | head -n1)
+          unzip -l "$jar" | grep -q 'grammar/core.clj'
+          unzip -l "$jar" | grep -q 'META-INF/maven/io.github.buddhilw/grammar/pom.xml'

@@ -1,5 +1,9 @@
 # grammar
 
+[![Clojars Project](https://img.shields.io/clojars/v/io.github.buddhilw/grammar.svg)](https://clojars.org/io.github.buddhilw/grammar)
+[![release](https://github.com/BuddhiLW/grammar/actions/workflows/release.yml/badge.svg)](https://github.com/BuddhiLW/grammar/actions/workflows/release.yml)
+[![ci](https://github.com/BuddhiLW/grammar/actions/workflows/ci.yml/badge.svg)](https://github.com/BuddhiLW/grammar/actions/workflows/ci.yml)
+
 Plan a language-neutral intent into a program that is valid for one observed
 runtime: the shell it runs in, the tools on its PATH, the syntax it accepts,
 the characters and length a channel allows.
@@ -7,6 +11,14 @@ the characters and length a channel allows.
 v1 proves one claim: **one intent produces different valid implementations
 under different observed restrictions, with no handwritten per-environment
 commands.**
+
+## Install
+
+`deps.edn`, with the version from the Clojars badge above:
+
+```edn
+io.github.buddhilw/grammar {:mvn/version "0.1.1"}
+```
 
 ## Pieces
 
@@ -62,6 +74,19 @@ clojure -M:test
 
 Runs against real `bash`, `bash -r`, `dash`, `busybox sh` and `python3`, with
 PATH cut down per runtime to a scratch bin dir.
+
+## Release
+
+Built and published with [hive-build](https://clojars.org/io.github.hive-agi/hive-build)
+(`clojure -T:build <task>`; coordinates in `version.edn`, version floor in
+`VERSION`).
+
+- `ci.yml`: the suite, the licence check and a jar build on every pull request
+  and every push outside `main`.
+- `release.yml`: on a push to `main` that changes the library (src, test,
+  deps, version, licence, workflows), runs the suite, checks the licence, tags
+  `v<patch+1>` of the newest tag and deploys to Clojars. Nothing is committed
+  back to `main`. Secrets: `CLOJARS_USERNAME`, `CLOJARS_DEPLOY_TOKEN`.
 
 ## License
 
