@@ -84,9 +84,14 @@ Built and published with [hive-build](https://clojars.org/io.github.hive-agi/hiv
 - `ci.yml`: the suite, the licence check and a jar build on every pull request
   and every push outside `main`.
 - `release.yml`: on a push to `main` that changes the library (src, test,
-  deps, version, licence, workflows), runs the suite, checks the licence, tags
-  `v<patch+1>` of the newest tag and deploys to Clojars. Nothing is committed
-  back to `main`. Secrets: `CLOJARS_USERNAME`, `CLOJARS_DEPLOY_TOKEN`.
+  deps, version, licence, workflows), runs the suite and checks the licence.
+  It releases patch+1 of the highest of `VERSION`, the newest `v*` tag and the
+  newest release on Clojars, and stops if Clojars cannot be asked. It deploys
+  to Clojars and checks the upload, then pushes the tag and publishes a GitHub
+  release with that version's changelog section and the jar. A tag this
+  workflow pushes therefore names a version that shipped from that commit.
+  Nothing is committed back to `main`. Secrets: `CLOJARS_USERNAME`,
+  `CLOJARS_DEPLOY_TOKEN`.
 
 ## License
 
