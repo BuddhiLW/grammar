@@ -7,14 +7,27 @@
   through a context wrapper when they are not, nothing when neither is."
   (:require [clojure.test :refer [deftest is testing]]
             [grammar.core :as g]
-            [grammar.fixtures :as fx])
+            [grammar.fixtures :as fx]
+            [grammar.profile :as p])
   (:import [java.io File]))
 
 (def ^:private runtimes
   [[:coreutils :dash  [:mkdir :rm]       :sh.ensure-dir/mkdir   :sh.remove-file/rm]
    [:rbash-py  :rbash [:python3]         :ctx/sh->python        :ctx/sh->python]
-   [:busybox   :busybox []               :sh.ensure-dir/mkdir   :sh.remove-file/rm]
+   [:busybox   :busybox []               :applet                :applet]
    [:bare      :dash  []                 nil                    nil]])
+
+(defn- expected-heads
+  "busybox-static's shell runs its applets with an empty PATH; a dynamically
+  linked busybox (Debian/Ubuntu `busybox`) does not. So for :applet rows the
+  expected program follows the observed :sh.cmd/mkdir verdict: mkdir and rm
+  when the shell resolves applets, nothing when it does not."
+  [mk-head rm-head profile]
+  (if (= :applet mk-head)
+    (if (= :yes (p/verdict profile :sh.cmd/mkdir))
+      [:sh.ensure-dir/mkdir :sh.remove-file/rm]
+      [nil nil])
+    [mk-head rm-head]))
 
 (deftest same-op-different-programs
   (let [out (fx/tmp-dir! "grammar-fs-")]
@@ -26,7 +39,8 @@
               file (str out "/" (name id) ".txt")
               _ (spit file "x")
               mk (g/realize! rt prof [:ensure-dir {:path dir}] {:resolve true})
-              rm (g/realize! rt (:profile-after mk) [:remove-file {:path file}] {:resolve true})]
+              rm (g/realize! rt (:profile-after mk) [:remove-file {:path file}] {:resolve true})
+              [mk-head rm-head] (expected-heads mk-head rm-head (:profile-after mk))]
           (if mk-head
             (do (is (= mk-head (first (:realization mk))))
                 (is (true? (:ok? (:verified mk))) (pr-str (:execution mk)))
