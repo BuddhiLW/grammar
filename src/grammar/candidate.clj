@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.candidate
   "Candidate programs: code plus the provenance that justifies it.
 

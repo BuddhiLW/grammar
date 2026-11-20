@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.play
   "REPL playground. C-c C-e / C-x C-e each form in the comment block."
   (:require [grammar.core :as g]

@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.fixtures
   "Controlled runtimes: real interpreters whose PATH is cut down to a
   scratch bin dir holding only the chosen tools. Restrictions are produced

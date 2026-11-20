@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.roundtrip-test
   "Literal correctness. Random strings go through every literal encoder and
   through random context stacks; real interpreters execute the result and

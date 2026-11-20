@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.probe
   "Discovery. A probe is a law stated as a tiny script with an expected
   stdout, run in the runtime under study.

@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.write-file-test
   "Acceptance: one :write-file intent, several controlled runtimes, no
   handwritten per-environment command. Planning, rendering, execution and

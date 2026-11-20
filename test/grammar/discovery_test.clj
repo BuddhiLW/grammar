@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.discovery-test
   "The one discovery test: probe every controlled runtime, then check the
   basic laws that make a profile trustworthy.

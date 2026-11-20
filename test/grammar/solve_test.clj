@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.solve-test
   "Pure planner behaviour over declared profiles: no processes."
   (:require [clojure.test :refer [deftest is testing]]

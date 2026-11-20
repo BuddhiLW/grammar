@@ -1,3 +1,6 @@
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;; Copyright (C) 2026 buddhilw
+
 (ns grammar.core
   "Facade: discover a runtime, plan an intent, run it there, verify the effect.
 
