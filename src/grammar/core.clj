@@ -52,18 +52,47 @@
                               (some? actual)
                               (Arrays/equals (utf8 (:content arg)) ^bytes actual))]
                   {:check :file-bytes :exit (:exit run) :ok? ok
-                   :bytes (when actual (alength ^bytes actual))})))
+                   :bytes (when actual (alength ^bytes actual))})
+    :run {:check :exit-zero :exit (:exit run) :ok? (= 0 (:exit run))}))
+
+(defn resolve!
+  "Probe, in runtime, every cap in caps that is still :unknown and has an
+  on-demand probe (e.g. :bin/git). Returns the enriched profile."
+  [runtime profile caps]
+  (probe/resolve-caps profile (rt/runtime-id runtime) (rt/runtime-lang runtime)
+                      #(rt/execute runtime %) caps))
+
+(defn plan-resolving!
+  "Plan intent for runtime; when the plan is :blocked-on-unknown, probe its
+  :needs on demand and plan again, until it stops changing.
+  Returns {:result Result :profile profile-after}."
+  ([runtime profile intent] (plan-resolving! runtime profile intent {}))
+  ([runtime profile intent opts]
+   (loop [prof profile]
+     (let [res (plan prof (rt/runtime-lang runtime) intent opts)
+           prof' (if (= :blocked-on-unknown (:status res))
+                   (resolve! runtime prof (:needs res))
+                   prof)]
+       (if (= prof' prof)
+         {:result res :profile prof}
+         (recur prof'))))))
 
 (defn realize!
   "Plan intent for runtime's language under profile, execute it, verify it.
-  A non-:ok plan is returned unchanged: nothing is run."
+  A non-:ok plan is returned unchanged: nothing is run. opts :resolve true
+  probes blocked unknowns on demand first (see plan-resolving!); the
+  enriched profile is then under :profile-after."
   ([runtime profile intent] (realize! runtime profile intent {}))
   ([runtime profile intent opts]
-   (let [res (plan profile (rt/runtime-lang runtime) intent opts)]
+   (let [{res :result prof :profile} (if (:resolve opts)
+                                       (plan-resolving! runtime profile intent (dissoc opts :resolve))
+                                       {:result (plan profile (rt/runtime-lang runtime) intent opts)
+                                        :profile profile})
+         res (cond-> (assoc res :runtime (rt/runtime-id runtime))
+               (:resolve opts) (assoc :profile-after prof))]
      (if (= :ok (:status res))
        (let [run (rt/execute runtime (:code res))]
          (assoc res
-                :runtime (rt/runtime-id runtime)
-                :execution (select-keys run [:exit :err :error])
+                :execution (select-keys run [:exit :out :err :error])
                 :verified (verify intent run)))
-       (assoc res :runtime (rt/runtime-id runtime))))))
+       res))))

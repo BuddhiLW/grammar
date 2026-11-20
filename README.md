@@ -38,6 +38,20 @@ io.github.buddhilw/grammar {:mvn/version "0.1.1"}
 - `[:str s]`: emit exactly the bytes of `s` on stdout. Proves literal correctness.
 - `[:write-file {:path p :content c}]`: `p` holds exactly `c`. Proves planning,
   rendering, execution and verification together.
+- `[:run {:argv ["prog" "arg" ...]}]`: execute `prog` with each argv element as
+  exactly one word (no NUL, which no argv can carry). The program is a
+  capability, `:bin/prog`, resolved on demand: plain planning returns
+  `:blocked-on-unknown` with `:needs [:bin/prog]`; `realize!` with
+  `{:resolve true}` (or `plan-resolving!`) probes it in the runtime, records
+  the evidence and plans again. Verified by exit status 0.
+
+## On-demand capabilities
+
+The fixed probe catalog covers the shell's grammar. Capabilities that depend
+on the intent (`:bin/<program>`) are probed when a plan needs them:
+`grammar.probe/on-demand` gives the probe for a language, `grammar.core/resolve!`
+runs it. A realization adds intent-dependent requirements through
+`:requires-of (fn [intent] caps)`.
 
 ## Capabilities are tri-state
 

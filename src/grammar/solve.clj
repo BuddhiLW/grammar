@@ -19,6 +19,12 @@
 
 (def ^:private order (juxt :cost :id))
 
+(defn requires-of
+  "Capabilities realization r relies on for intent: its static :requires
+  plus whatever its optional :requires-of (fn [intent] caps) adds."
+  [r intent]
+  (into (set (:requires r)) (when-let [f (:requires-of r)] (f intent))))
+
 (defn make-env
   "Planning environment over profile. admit is (fn [profile requires] bool),
   default grammar.profile/admits? (all :yes)."
@@ -35,6 +41,7 @@
 
 (defn- direct [env visited lang [op :as intent]]
   (for [r (get-in env [:by-key [op lang]])
+        :let [r (assoc r :requires (requires-of r intent))]
         :when ((:admit env) (:requires r))
         cand ((:render r) (render-env env visited) intent)]
     (c/stamp cand r lang)))
@@ -112,13 +119,14 @@
   (merge {:path path :id (:id r)} (p/classify profile (:requires r))))
 
 (defn explain
-  "Every option the planner had, with its required capabilities split by
-  verdict. pairs restricts wrappers to those [outer inner] pairs; nil means
-  every cross-language wrapper between langs."
-  [env langs op pairs]
+  "Every option the planner had for intent, with its required capabilities
+  split by verdict. pairs restricts wrappers to those [outer inner] pairs;
+  nil means every cross-language wrapper between langs."
+  [env langs [op :as intent] pairs]
   (let [profile (:profile env)
         lset (set langs)
-        rows-for (fn [o l] (map #(option-row profile [l o] %) (get-in env [:by-key [o l]])))]
+        rows-for (fn [o l] (map #(option-row profile [l o] (assoc % :requires (requires-of % intent)))
+                                (get-in env [:by-key [o l]])))]
     (vec (concat
           (mapcat #(rows-for op %) langs)
           (mapcat #(rows-for :lit %) langs)
@@ -148,8 +156,8 @@
                            (stack-candidates e stack intent)
                            (candidates e #{lang} lang intent)))
              rows (if stack
-                    (explain env (vec (distinct stack)) (first intent) (set (map vec (partition 2 1 stack))))
-                    (explain env (reachable-langs env lang) (first intent) nil))
+                    (explain env (vec (distinct stack)) intent (set (map vec (partition 2 1 stack))))
+                    (explain env (reachable-langs env lang) intent nil))
              base {:intent intent :lang lang :profile (:id profile)
                    :unknowns (->> rows (mapcat :unknown) distinct sort vec)}
              {:keys [found searched rejected]} (search (gen env) text budget)]

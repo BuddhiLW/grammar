@@ -16,11 +16,19 @@
   :render receives an env whose (:lit env) is (fn [lang s] candidates) and
   returns a lazy seq of candidates (see grammar.candidate)."
   (:require [grammar.candidate :as c]
-            [grammar.lit :as lit]))
+            [grammar.lit :as lit]
+            [clojure.string :as str]))
 
 (defn- lit-in [env lang s] ((:lit env) lang s))
 
 (defn- leaf-lit [encode] (fn [_ [_ s]] (c/leaf (encode s))))
+
+(defn bin-cap
+  "Capability: program name resolves to an executable on the runtime's PATH."
+  [program]
+  (keyword "bin" program))
+
+(defn- run-requires [[_ {:keys [argv]}]] #{(bin-cap (first argv))})
 
 (def realizations
   [;; ------------------------------------------------ literals: sh
@@ -77,7 +85,21 @@
     :requires #{:py/pathlib}
     :render (fn [env [_ {:keys [path content]}]]
               (c/combine (fn [p c] (str "import pathlib;pathlib.Path(" p ").write_bytes(" c ".encode())"))
-                         (lit-in env :python path) (lit-in env :python content)))}])
+                         (lit-in env :python path) (lit-in env :python content)))}
+
+   ;; ------------------------------------------------ :run  (exec argv, every word literal)
+   {:id :sh.run/words :intent :run :lang :sh :cost 1
+    :requires #{} :requires-of run-requires
+    :doc "One simple command; each argv element is one quoted word."
+    :render (fn [env [_ {:keys [argv]}]]
+              (apply c/combine (fn [& ws] (str/join " " ws))
+                     (map #(lit-in env :sh %) argv)))}
+   {:id :py.run/subprocess :intent :run :lang :python :cost 1
+    :requires #{:py/subprocess} :requires-of run-requires
+    :render (fn [env [_ {:keys [argv]}]]
+              (apply c/combine
+                     (fn [& ws] (str "import subprocess,sys;sys.exit(subprocess.call([" (str/join "," ws) "]))"))
+                     (map #(lit-in env :python %) argv)))}])
 
 (def wrappers
   [{:id :ctx/sh->sh :outer :sh :inner :sh :cost 5

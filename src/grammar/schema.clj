@@ -21,10 +21,20 @@
   [:tuple [:= :write-file]
    [:map {:closed true} [:path :string] [:content :string]]])
 
+(def ArgvWord
+  "An exec argument: any string without NUL, which no argv entry can hold."
+  [:and :string [:fn {:error/message "argv words cannot contain NUL"}
+                 #(not (.contains ^String % "\u0000"))]])
+
+(def Run
+  [:tuple [:= :run]
+   [:map {:closed true} [:argv [:vector {:min 1} ArgvWord]]]])
+
 (def Intent
   [:multi {:dispatch first}
    [:str Str]
-   [:write-file WriteFile]])
+   [:write-file WriteFile]
+   [:run Run]])
 
 (def Verdict [:enum :yes :no :unknown])
 

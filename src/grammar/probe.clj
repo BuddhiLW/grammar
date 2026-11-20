@@ -14,7 +14,8 @@
   output, so any later choice can be traced back to what was observed.
   This namespace is pure: the runner is passed in."
   (:require [clojure.string :as str]
-            [grammar.profile :as p]))
+            [grammar.profile :as p]
+            [grammar.lit :as lit]))
 
 (def probes
   "Ordered so that every :needs is probed before the probes that rely on it.
@@ -79,16 +80,48 @@
    :reason (str "skipped: prerequisite not proven: "
                 (str/join ", " (map #(str % "=" (name (p/verdict profile %))) unproven)))})
 
+(defn- step
+  "Run one probe through run! unless a prerequisite is unproven, and fold
+  the resulting evidence into profile."
+  [runtime-id run! profile {:keys [needs] :as probe}]
+  (let [unproven (vec (remove #(= :yes (p/verdict profile %)) needs))]
+    (p/add-evidence profile
+                    (if (seq unproven)
+                      (skip-evidence runtime-id probe profile unproven)
+                      (run-evidence runtime-id probe (run! (:script probe)))))))
+
 (defn discover
   "Run every probe through run! (fn [script] -> {:argv :exit :out :err} or
   {:argv :error}), in order, folding the evidence into a fresh profile."
   ([runtime-id run!] (discover runtime-id run! probes))
   ([runtime-id run! probes]
-   (reduce (fn [profile {:keys [needs] :as probe}]
-             (let [unproven (vec (remove #(= :yes (p/verdict profile %)) needs))]
-               (p/add-evidence profile
-                               (if (seq unproven)
-                                 (skip-evidence runtime-id probe profile unproven)
-                                 (run-evidence runtime-id probe (run! (:script probe)))))))
-           (p/empty-profile runtime-id)
-           probes)))
+   (reduce (partial step runtime-id run!) (p/empty-profile runtime-id) probes)))
+
+(defn on-demand
+  "Probe for a capability the fixed catalog cannot list ahead of time, in
+  the runtime's language, or nil. :bin/<program> holds when program
+  resolves to an executable file on PATH (a builtin does not count)."
+  [lang cap]
+  (when (= "bin" (namespace cap))
+    (let [prog (name cap)]
+      (case lang
+        :sh (when-let [q (lit/sh-single prog)]
+              {:cap cap :needs [:sh/printf :sh/single-quote]
+               :script (str "case $(command -v " q ") in */*) printf %s ok;; *) printf %s no;; esac")
+               :expect "ok"})
+        :python {:cap cap :needs []
+                 :script (str "import shutil,sys;sys.stdout.write('ok' if shutil.which("
+                              (lit/py-single prog) ") else 'no')")
+                 :expect "ok"}
+        nil))))
+
+(defn resolve-caps
+  "Probe every cap in caps that is still :unknown and has an on-demand probe
+  in lang, folding the evidence into profile. Other caps are left as they are."
+  [profile runtime-id lang run! caps]
+  (reduce (fn [prof cap]
+            (if-let [pr (and (= :unknown (p/verdict prof cap)) (on-demand lang cap))]
+              (step runtime-id run! prof pr)
+              prof))
+          profile
+          caps))
