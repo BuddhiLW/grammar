@@ -44,7 +44,9 @@
    {:cap :py/pathlib      :needs [:interp/python3 :sh/single-quote]
     :script "python3 -c 'import pathlib,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
    {:cap :py/subprocess   :needs [:interp/python3 :sh/single-quote]
-    :script "python3 -c 'import subprocess,sys;sys.stdout.write(\"ok\")'" :expect "ok"}])
+    :script "python3 -c 'import subprocess,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
+   {:cap :py/urllib       :needs [:interp/python3 :sh/single-quote]
+    :script "python3 -c 'import shutil,sys,urllib.request;sys.stdout.write(\"ok\")'" :expect "ok"}])
 
 (defn judge
   "Verdict of one probe run. A run that never happened proves nothing."

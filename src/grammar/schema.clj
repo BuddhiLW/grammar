@@ -10,7 +10,8 @@
               its exit status and output, or an explicit declaration.
   Profile     capabilities + text constraints + the evidence behind them.
   Result      what the planner returns, always carrying its justification."
-  (:require [malli.core :as m]
+  (:require [clojure.string :as str]
+            [malli.core :as m]
             [malli.error :as me]))
 
 (def Lang
@@ -44,13 +45,33 @@
 (def RemoveFile
   [:tuple [:= :remove-file] [:map {:closed true} [:path PathArg]]])
 
+(defn http-url?
+  "True for a string naming an http:// or https:// URL (scheme in lower case)
+  with no ASCII control character. Every other scheme (file:, ftp:, ...) and
+  every option-like word (a leading -) is refused, so no fetch tool can read
+  it as anything but an http URL; a control character (CR LF above all) could
+  split the HTTP request a fetch tool writes, so it is refused too."
+  [s]
+  (and (string? s)
+       (or (str/starts-with? s "http://") (str/starts-with? s "https://"))
+       (not-any? #(let [c (int %)] (or (< c 32) (= c 127))) s)))
+
+(def HttpUrl
+  "A URL an :http-get fetches: http:// or https://, no control characters."
+  [:fn {:error/message "only http:// and https:// URLs without control characters are accepted"}
+   http-url?])
+
+(def HttpGet
+  [:tuple [:= :http-get] [:map {:closed true} [:url HttpUrl]]])
+
 (def Intent
   [:multi {:dispatch first}
    [:str Str]
    [:write-file WriteFile]
    [:run Run]
    [:ensure-dir EnsureDir]
-   [:remove-file RemoveFile]])
+   [:remove-file RemoveFile]
+   [:http-get HttpGet]])
 
 (def Verdict [:enum :yes :no :unknown])
 

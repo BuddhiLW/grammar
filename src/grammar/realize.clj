@@ -129,7 +129,33 @@
     :requires #{:py/pathlib}
     :render (fn [env [_ {:keys [path]}]]
               (c/combine #(str "import pathlib;pathlib.Path(" % ").unlink(missing_ok=True)")
-                         (lit-in env :python path)))}])
+                         (lit-in env :python path)))}
+
+   ;; ------------------------------------------------ :http-get  (response body on stdout, byte for byte)
+   ;; Exit 0 on a 2xx answer, non-zero on a 4xx/5xx answer or a connection
+   ;; failure. Every realization follows redirects. The URL is one literal
+   ;; word after `--`; the Intent schema admits only http:// and https://, so
+   ;; no URL can start with `-` anyway.
+   {:id :sh.http-get/curl :intent :http-get :lang :sh :cost 1
+    :requires #{:sh.cmd/curl}
+    :doc "-q (first) skips .curlrc; -f fails on 4xx/5xx; -sS quiet but reports errors; -L follows redirects; -g turns URL globbing off, so [1-2] or {a,b} in a URL is one request, not several."
+    :render (fn [env [_ {:keys [url]}]] (sh-words env ["curl" "-q" "-fsSLg" "--" url]))}
+   {:id :sh.http-get/wget :intent :http-get :lang :sh :cost 2
+    :requires #{:sh.cmd/wget}
+    :doc "GNU wget or a busybox wget applet: the flags and `--` mean the same to both."
+    :render (fn [env [_ {:keys [url]}]] (sh-words env ["wget" "-qO-" "--" url]))}
+   {:id :sh.http-get/busybox-wget :intent :http-get :lang :sh :cost 3
+    :requires #{:sh.cmd/busybox}
+    :doc "The wget applet through the busybox binary, for a PATH with busybox but no wget. busybox wget accepts `--` (getopt), checked against busybox 1.37."
+    :render (fn [env [_ {:keys [url]}]] (sh-words env ["busybox" "wget" "-qO-" "--" url]))}
+   {:id :py.http-get/urllib :intent :http-get :lang :python :cost 1
+    :requires #{:py/urllib}
+    :doc "urlopen follows redirects and raises HTTPError for a 4xx/5xx answer and URLError when it cannot connect; sys.exit of the exception prints it on stderr and exits 1. The program text holds no quote character of its own."
+    :render (fn [env [_ {:keys [url]}]]
+              (c/combine #(str "import shutil,sys,urllib.request\n"
+                               "try:shutil.copyfileobj(urllib.request.urlopen(" % "),sys.stdout.buffer)\n"
+                               "except Exception as e:sys.exit(e)")
+                         (lit-in env :python url)))}])
 
 (def wrappers
   [{:id :ctx/sh->sh :outer :sh :inner :sh :cost 5
