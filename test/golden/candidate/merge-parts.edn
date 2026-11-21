@@ -1,0 +1,10 @@
+{:none {:code "", :via [], :requires [], :stack [], :cost 0, :key []},
+ :tie-stack
+ {:code [1 2], :via [], :requires [], :stack [:a], :cost 0, :key []},
+ :two
+ {:code "ab",
+  :via [:x :y :z],
+  :requires [:r1 :r2],
+  :stack [:sh :perl],
+  :cost 3,
+  :key [[0 1 :x] [0 2 :y]]}}
