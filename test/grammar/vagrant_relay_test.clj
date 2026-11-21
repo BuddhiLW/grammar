@@ -32,8 +32,10 @@
 (defn config!
   "An ssh_config for the lab in a temp file: vm1 by its private-network
   address, the rest by name from inside."
-  ([] (config! (System/getenv "GRAMMAR_VAGRANT_KEY")))
-  ([k]
+  ([] (config! (System/getenv "GRAMMAR_VAGRANT_KEY")
+               (or (System/getenv "GRAMMAR_VAGRANT_VM1_HOST") "192.168.56.211")
+               (or (System/getenv "GRAMMAR_VAGRANT_VM1_PORT") "22")))
+  ([k host port]
    (let [d (.toFile (java.nio.file.Files/createTempDirectory "grammar-vlab-" (make-array java.nio.file.attribute.FileAttribute 0)))
          f (java.io.File. d "config")
          cp (str d "/cm-%C")]
@@ -42,8 +44,7 @@
      (spit f (str/join "\n" ["Host *" (str "  IdentityFile " k) "  IdentitiesOnly yes"
                              "  UserKnownHostsFile /dev/null" "  StrictHostKeyChecking no" "  LogLevel ERROR"
                              "  ConnectTimeout 15"
-                             "Host vm1" (str "  HostName " (or (System/getenv "GRAMMAR_VAGRANT_VM1_HOST") "192.168.56.211"))
-                             (str "  Port " (or (System/getenv "GRAMMAR_VAGRANT_VM1_PORT") "22")) "  User relay"
+                             "Host vm1" (str "  HostName " host) (str "  Port " port) "  User relay"
                              "  ControlMaster auto" (str "  ControlPath " cp)
                              "  ControlPersist 120" ""]))
      (str f))))
