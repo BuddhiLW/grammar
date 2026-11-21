@@ -12,6 +12,7 @@
             [grammar.core :as g]
             [grammar.fixtures :as fx]
             [grammar.profile :as p]
+            [grammar.realize :as realize]
             [grammar.runtime :as rt]
             [grammar.schema :as s])
   (:import [com.sun.net.httpserver HttpExchange HttpHandler HttpServer]
@@ -52,12 +53,56 @@
 
 (defn- base [] (str "http://127.0.0.1:" (.getPort (.getAddress ^HttpServer @server))))
 
+(def short-body
+  "What the short server sends after its headers: fewer bytes than it declares."
+  (.getBytes "hello" "UTF-8"))
+
+(def ^:private short-server (atom nil))
+
+(defn- read-request-head
+  "Consume the request up to its blank line, so closing never resets a
+  connection the client is still writing to."
+  [^java.io.InputStream in]
+  (loop [tail 0]
+    (let [b (.read in)]
+      (when-not (neg? b)
+        (let [tail (bit-and (bit-or (bit-shift-left tail 8) b) 0xffffffff)]
+          (when-not (= tail 0x0d0a0d0a) (recur tail)))))))
+
+(defn- start-short-server!
+  "A raw socket server answering every request with 200 and Content-Length
+  10, writing only short-body and then closing cleanly (FIN, not RST).
+  com.sun.net.httpserver cannot send a short fixed-length body that way."
+  []
+  (let [ss (ServerSocket. 0 50 (InetAddress/getByName "127.0.0.1"))
+        head (.getBytes (str "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n"
+                             "Content-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
+                        "UTF-8")]
+    (future
+      (try
+        (loop []
+          (let [^java.net.Socket s (.accept ss)]
+            (try
+              (read-request-head (.getInputStream s))
+              (doto (.getOutputStream s) (.write head) (.write ^bytes short-body) (.flush))
+              (.shutdownOutput s)
+              (catch java.io.IOException _ nil)
+              (finally (.close s))))
+          (recur))
+        (catch java.net.SocketException _ nil)))
+    ss))
+
+(defn- short-url []
+  (str "http://127.0.0.1:" (.getLocalPort ^ServerSocket @short-server) "/short"))
+
 (defn- with-server [f]
   (let [srv (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)]
     (.createContext srv "/" handler)
     (.start srv)
     (reset! server srv)
-    (try (f) (finally (.stop srv 0) (reset! server nil)))))
+    (reset! short-server (start-short-server!))
+    (try (f) (finally (.stop srv 0) (.close ^ServerSocket @short-server)
+                      (reset! server nil) (reset! short-server nil)))))
 
 (use-fixtures :once with-server)
 
@@ -83,7 +128,7 @@
 (def ^:private rows
   "[id shell tools expected-head]: one runtime per realization."
   [[:hg-curl     :dash    [:curl]    :sh.http-get/curl]
-   [:hg-wget     :dash    [:wget]    :sh.http-get/wget]
+   [:hg-wget     :dash    [:wget]    :sh.http-get/gnu-wget]
    [:hg-busybox  :dash    [:busybox] :sh.http-get/busybox-wget]
    [:hg-bb-shell :busybox []         :applet]
    [:hg-python   :dash    [:python3] :ctx/sh->python]])
@@ -160,6 +205,64 @@
         (is (not= 0 (get-in res [:execution :exit])) (pr-str (:execution res)))
         (is (false? (:ok? (:verified res))))
         (is (= "" (get-in res [:execution :out])) "an error page is not a body")))))
+
+(def ^:private http-get-ids
+  (into #{} (comp (filter #(= :http-get (:intent %))) (map :id)) realize/realizations))
+
+(defn- only
+  "Modules in which the one :http-get realization is id: every other
+  intent keeps all its realizations, so literals and wrappers still work."
+  [id]
+  [(assoc g/core-module :realizations
+          (vec (remove #(and (= :http-get (:intent %)) (not= id (:id %))) realize/realizations)))])
+
+(deftest truncated-body-exits-non-zero
+  (let [ran (atom #{})]
+    (doseq [[row-id _ _ head] rows
+            :let [{r :rt prof :prof} (@rts row-id)]
+            :when (expected-head head prof)
+            id (sort http-get-ids)
+            :let [res (g/realize! r prof [:http-get {:url (short-url)}] {:modules (only id)})]
+            :when (= :ok (:status res))]
+      (swap! ran conj id)
+      (testing (str row-id " " (:realization res))
+        (is (some #{id} (:realization res)))
+        (is (not= 0 (get-in res [:execution :exit])) (pr-str (:execution res)))
+        (is (false? (:ok? (:verified res))))))
+    (testing "every realization ran against the short server, sh->python included"
+      (is (= http-get-ids @ran))))
+  (testing "a :python runtime too"
+    (let [py (fx/python-runtime! :hg-py-short [])
+          prof (g/discover! (fx/sh-runtime! :hg-py-short-probe :dash [:python3]))
+          run (rt/execute py (:code (g/plan prof :python [:http-get {:url (short-url)}])))]
+      (is (not= 0 (:exit run)) (pr-str run))
+      (is (str/includes? (str (:err run)) "EOFError") (:err run)))))
+
+(deftest https-never-goes-through-busybox-wget
+  (let [url "https://127.0.0.1:1/x"]
+    (testing "GNU Wget is proven by its banner; the busybox applet is not"
+      (is (= :yes (p/verdict (:prof (@rts :hg-wget)) :sh.wget/gnu)))
+      (is (= :no (p/verdict (:prof (@rts :hg-busybox)) :sh.wget/gnu)))
+      (is (= :no (p/verdict (:prof (@rts :hg-bb-shell)) :sh.wget/gnu))))
+    (testing "busybox wget serves http but declines https, through either name"
+      (doseq [id [:hg-busybox :hg-bb-shell]
+              :let [prof (:prof (@rts id))]
+              :when (expected-head :applet prof)]
+        (is (= :ok (:status (g/plan prof :sh [:http-get {:url "http://127.0.0.1:1/x"}]))) (str id))
+        (let [res (g/plan prof :sh [:http-get {:url url}])]
+          (is (contains? #{:unsatisfiable :blocked-on-unknown} (:status res))
+              (str id " " (pr-str (:realization res))))
+          (is (nil? (:code res))))))
+    (testing "in no runtime does any https plan use a busybox or unproven wget"
+      (doseq [[row-id] rows
+              :let [prof (:prof (@rts row-id))]
+              id [:sh.http-get/wget :sh.http-get/busybox-wget]]
+        (is (not= :ok (:status (g/plan prof :sh [:http-get {:url url}] {:modules (only id)})))
+            (str row-id " " id))))
+    (testing "GNU Wget serves https, with no wgetrc and no retries"
+      (let [res (g/plan (:prof (@rts :hg-wget)) :sh [:http-get {:url url}])]
+        (is (= :sh.http-get/gnu-wget (first (:realization res))))
+        (is (str/starts-with? (str (:code res)) "'wget' '--no-config' '--tries=1' '-qO-' '--' "))))))
 
 (deftest urls-cannot-inject
   (let [canary (str (fx/tmp-dir! "grammar-hg-canary-") "/pwned")
