@@ -25,7 +25,10 @@
    :tee (which "tee")
    :python3 (which "python3")
    :mkdir (which "mkdir")
-   :rm (which "rm")})
+   :rm (which "rm")
+   :curl (which "curl")
+   :wget (which "wget")
+   :busybox "/usr/bin/busybox"})
 
 (defn tmp-dir! [prefix]
   (str (Files/createTempDirectory prefix (make-array FileAttribute 0))))
