@@ -88,12 +88,29 @@
           j (last-index-of-bytes ob c)
           tail (when (>= j 0) (String. ob (int (+ j (alength c))) (int (- (alength ob) j (alength c))) "UTF-8"))
           code (when tail (re-matches #"(\d+)\n?" tail))]
-      (if (or (neg? i) (< j i) (nil? code))
+      (cond
+        ;; the far shell answered (it printed the close marker) but never
+        ;; ran the open: it parsed the program differently (csh, fish).
+        ;; That is an observation of the far side, judged on its output.
+        (and (neg? i) code)
+        (let [body (java.util.Arrays/copyOfRange ob 0 (int j))]
+          (assoc run :exit (Long/parseLong (second code)) :transport-exit (:exit run)
+                 :out-bytes body :out (String. body "UTF-8") :misparsed true))
+
+        ;; the hop delivered and the far shell ran, wrote to stderr, and
+        ;; exited 0 with no frame at all: a shell that refused the whole
+        ;; text at parse time (fish aborts a script on one syntax error).
+        ;; Also an observation of the far side.
+        (and (neg? i) (= 0 (:exit run)) (empty? ob) (seq (:err run)))
+        (assoc run :out-bytes ob :out "" :exit 2 :transport-exit 0 :misparsed true)
+
+        (or (neg? i) (< j i) (nil? code))
         (-> run
             (dissoc :out :out-bytes)
             (assoc :error (str "hop transport failed (outer exit " (:exit run) "): no complete frame from the far side")
                    :transport-exit (:exit run)
                    :raw-out (String. ob "UTF-8")))
+        :else
         (let [body (java.util.Arrays/copyOfRange ob (int (+ i (alength o))) (int j))]
           (cond-> (assoc run :exit (Long/parseLong (second code)) :transport-exit (:exit run)
                          :out-bytes body :out (String. body "UTF-8"))
@@ -109,17 +126,31 @@
   (let [q (str "'" (.replace ^String code "'" "'\\''") "'")]
     (str "printf '\\001grammar-hop\\002'; sh -c " q "\nprintf '\\001grammar-hop-exit:%s\\n' \"$?\"")))
 
+(declare relay)
+
 (defrecord StackedRuntime [id lang outer wrap]
   IRuntime
   (runtime-id [_] id)
   (runtime-lang [_] lang)
-  (execute [_ code]
+  (execute [this code]
     (let [framed? (= :sh lang)
           inner (if framed? (frame code) code)]
-      (if-let [outer-code (wrap inner)]
-        (cond-> (assoc (execute outer outer-code) :relayed outer-code)
+      (if-let [[base outer-code] (relay this inner)]
+        (cond-> (assoc (execute base outer-code) :relayed outer-code)
           framed? unframe)
         {:argv [] :error "the hop cannot carry this program"}))))
+
+(defn relay
+  "[base-runtime text] that runs code at the far end of rt's hops: every
+  hop's wrap applied innermost first, down to the first runtime that is
+  not stacked. Only the requested runtime frames its program, once;
+  framing at every layer would nest quoted frames and grow the text
+  exponentially with the hop count."
+  [rt code]
+  (loop [rt rt code code]
+    (if (instance? StackedRuntime rt)
+      (when-let [c ((:wrap rt) code)] (recur (:outer rt) c))
+      [rt code])))
 
 (defn stacked-runtime
   "A runtime reached THROUGH another one: execute renders code with wrap
