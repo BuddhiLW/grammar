@@ -15,6 +15,8 @@
   [code]
   (if code [{:code code :via [] :requires #{} :stack [] :cost 0 :key []}] []))
 
+;; ---------------------------------------------------------------- order
+
 (defn- lex
   "Lexicographic order on keys, vectors of [kind cost id] ranks. A proper
   prefix sorts first, so a bound sorts before every candidate under it."
@@ -32,15 +34,66 @@
       (let [k (lex (:key a) (:key b))]
         (if (zero? k) (compare (:n a) (:n b)) k)))))
 
-(defn- push
-  "Queue entry e (nil is skipped), numbered so equal ranks pop in the order
-  they were pushed."
-  [st e]
+;; ---------------------------------------------------------------- queue
+
+(def empty-queue
+  "A queue holding no entries."
+  {:q (sorted-set-by entry-cmp) :n 0})
+
+(defn push
+  "queue with entry e added; nil leaves it unchanged. Entries of equal rank
+  pop in the order they were pushed."
+  [queue e]
   (if e
-    (-> st
-        (update :q conj (assoc e :n (:n st)))
+    (-> queue
+        (update :q conj (assoc e :n (:n queue)))
         (update :n inc))
-    st))
+    queue))
+
+(defn pop-min
+  "[e rest] for the least entry e of queue and the queue without it, or nil
+  when queue is empty. e carries no insertion number."
+  [queue]
+  (when-let [e (first (:q queue))]
+    [(dissoc e :n) (update queue :q disj e)]))
+
+;; ---------------------------------------------------------------- entries
+
+(defn entry-kind
+  "The kind of queue entry e: :bound when it has an :open fn, :stream when it
+  has a :stream, else :candidate."
+  [e]
+  (cond
+    (:open e) :bound
+    (contains? e :stream) :stream
+    :else :candidate))
+
+(defmulti expand
+  "What popping entry e yields: {:emit candidate} or {:enqueue entries},
+  entries to push in order. Only a popped bound calls its :open, and only a
+  popped stream realizes its next element."
+  entry-kind)
+
+(defmethod expand :candidate [e]
+  {:emit e})
+
+(defmethod expand :bound [e]
+  {:enqueue [(-> e (dissoc :open) (assoc :stream ((:open e))))]})
+
+(defmethod expand :stream [e]
+  (if-let [[h :as s] (seq (:stream e))]
+    {:enqueue [h (assoc e :stream (rest s) :cost (:cost h) :key (:key h))]}
+    {:enqueue []}))
+
+(defn- drain
+  "Lazy seq of the candidates queue yields, popping and expanding one entry
+  at a time."
+  [queue]
+  (lazy-seq
+   (when-let [[e queue] (pop-min queue)]
+     (let [{:keys [emit enqueue]} (expand e)
+           queue (reduce push queue enqueue)]
+       (if emit (cons emit (drain queue)) (drain queue))))))
 
 (defn best-first
   "Lazy seq of candidates, cheapest :cost first, from queue entries:
@@ -52,52 +105,63 @@
   An entry's :cost is a lower bound for everything it opens; :key ranks
   ties. A bound costs nothing until it reaches the front of the queue."
   [entries]
-  (letfn [(step [st]
-            (lazy-seq
-             (when-let [e (first (:q st))]
-               (let [st (update st :q disj e)
-                     e (dissoc e :n)]
-                 (cond
-                   (:open e)
-                   (step (push st (-> e (dissoc :open) (assoc :stream ((:open e))))))
+  (drain (reduce push empty-queue entries)))
 
-                   (contains? e :stream)
-                   (if-let [s (seq (:stream e))]
-                     (let [h (first s)]
-                       (step (-> st
-                                 (push h)
-                                 (push (assoc e :stream (rest s) :cost (:cost h) :key (:key h))))))
-                     (step st))
+;; ---------------------------------------------------------------- product
 
-                   :else (cons e (step st)))))))]
-    (step (reduce push {:q (sorted-set-by entry-cmp) :n 0} entries))))
+(defn- longest
+  "The longest of stacks, the first among equals; [] when there is none."
+  [stacks]
+  (reduce (fn [a s] (if (> (count s) (count a)) s a)) [] stacks))
+
+(defn merge-parts
+  "One candidate from candidates parts, in order: :code is f applied to
+  their codes, :via and :key concatenate, :requires unions, :stack is the
+  longest, :cost sums."
+  [f parts]
+  {:code (apply f (map :code parts))
+   :via (into [] (mapcat :via) parts)
+   :requires (into #{} (mapcat :requires) parts)
+   :stack (longest (map :stack parts))
+   :cost (transduce (map :cost) + 0 parts)
+   :key (into [] (mapcat :key) parts)})
+
+(defn successors
+  "The index tuples after tuple t: t with one coordinate incremented, for
+  each coordinate at or after its last nonzero one. From the zero tuple this
+  reaches every tuple of naturals exactly once."
+  [t]
+  (let [from (or (last (keep-indexed (fn [i j] (when (pos? j) i)) t)) 0)]
+    (map #(update t % inc) (range from (count t)))))
+
+(defn- tuple-entry
+  "The queue entry for index tuple t over the vector of candidate seqs vs,
+  numbered by t, or nil when a coordinate runs past its seq."
+  [f vs t]
+  (let [parts (map-indexed (fn [i j] (nth (vs i) j nil)) t)]
+    (when (every? some? parts)
+      (assoc (merge-parts f parts) :n t))))
+
+(defn- walk-tuples
+  "Lazy seq of the candidates of queue q, a sorted set of tuple entries,
+  each popped entry replaced by the entries of its successor tuples."
+  [f vs q]
+  (lazy-seq
+   (when-let [e (first q)]
+     (cons (dissoc e :n)
+           (walk-tuples f vs (into (disj q e)
+                                   (keep #(tuple-entry f vs %))
+                                   (successors (:n e))))))))
 
 (defn combine
   "Lazy product of candidate seqs, cheapest total cost first. Each seq must
   be ascending by :cost. f receives the codes and returns the combined code.
   Ties pop by key, then by index tuple, so the walk is deterministic."
   [f & seqs]
-  (let [vs (vec seqs)
-        k (count vs)
-        entry (fn [t]
-                (let [parts (map-indexed (fn [i j] (nth (vs i) j nil)) t)]
-                  (when (every? some? parts)
-                    {:code (apply f (map :code parts))
-                     :via (into [] (mapcat :via) parts)
-                     :requires (into #{} (mapcat :requires) parts)
-                     :stack (reduce (fn [a s] (if (> (count s) (count a)) s a)) [] (map :stack parts))
-                     :cost (transduce (map :cost) + 0 parts)
-                     :key (into [] (mapcat :key) parts)
-                     :n t})))
-        successors (fn [t]
-                     (let [from (or (last (keep-indexed (fn [i j] (when (pos? j) i)) t)) 0)]
-                       (keep #(entry (update t % inc)) (range from k))))
-        step (fn step [q]
-               (lazy-seq
-                (when-let [e (first q)]
-                  (cons (dissoc e :n)
-                        (step (into (disj q e) (successors (:n e))))))))]
-    (step (into (sorted-set-by entry-cmp) (keep entry [(vec (repeat k 0))])))))
+  (let [vs (vec seqs)]
+    (walk-tuples f vs (into (sorted-set-by entry-cmp)
+                            (keep #(tuple-entry f vs %))
+                            [(vec (repeat (count vs) 0))]))))
 
 (defn weight
   "What realization r adds to a candidate's :cost: its :cost, except a
