@@ -17,39 +17,108 @@
             [grammar.profile :as p]
             [grammar.lit :as lit]))
 
+(defn probe-lang
+  "Language a probe's script is written in: its :lang, :sh when absent.
+  discover runs a probe only in a runtime of that language."
+  [probe]
+  (:lang probe :sh))
+
+(def os-functions
+  "The os functions the python realizations reach: pathlib's mkdir calls
+  os.mkdir, its unlink calls os.unlink. Each has a fixed :py.os/<f> probe."
+  ["mkdir" "unlink"])
+
+(defn- os-fn-probe [f]
+  {:cap (keyword "py.os" f) :lang :python :needs [:py/sys]
+   :script (str "import os,sys;sys.stdout.write(\"ok\" if callable(getattr(os," (lit/py-double f)
+                ",None)) else \"no\")")
+   :expect "ok"})
+
+(def py-probes
+  "Probes written in python, for a runtime whose language is :python
+  (python3 -c). Ordered like `probes`: every :needs is probed earlier in
+  this list. The scripts hold no single quote, so each one lifts into an sh
+  probe unchanged (see python-via-sh).
+
+    :py/sys            import sys and sys.stdout.write work
+    :py/stdout-buffer  bytes written to sys.stdout.buffer arrive unchanged:
+                       NUL, a two-byte UTF-8 sequence and CR LF included
+    :py/pathlib        import pathlib
+    :py/subprocess     import subprocess
+    :py/urllib         import shutil, urllib.request
+    :py.os/<f>         os.<f> exists and is callable, for f in os-functions
+    :interp/sh         subprocess runs [\"sh\" \"-c\" ...], sh found on PATH:
+                       the argv :ctx/python->sh runs. A /bin/sh off PATH does
+                       not count. Marked :lift false: sh runtimes prove
+                       :interp/sh with their own probe."
+  (-> [{:cap :py/sys :lang :python :needs []
+        :script "import sys;sys.stdout.write(\"ok\")" :expect "ok"}
+       {:cap :py/stdout-buffer :lang :python :needs []
+        :script "import sys;b=sys.stdout.buffer;b.write(bytes([111,0,195,169,13,10,107]));b.flush()"
+        :expect "o\u0000\u00e9\r\nk"}
+       {:cap :py/pathlib :lang :python :needs [:py/sys]
+        :script "import pathlib,sys;sys.stdout.write(\"ok\")" :expect "ok"}
+       {:cap :py/subprocess :lang :python :needs [:py/sys]
+        :script "import subprocess,sys;sys.stdout.write(\"ok\")" :expect "ok"}
+       {:cap :py/urllib :lang :python :needs [:py/sys]
+        :script "import shutil,sys,urllib.request;sys.stdout.write(\"ok\")" :expect "ok"}]
+      (into (map os-fn-probe) os-functions)
+      (conj {:cap :interp/sh :lang :python :lift false :needs [:py/sys :py/subprocess]
+             :script (str "import subprocess,sys\n"
+                          "try:o=subprocess.run([\"sh\",\"-c\",\"printf %s ok\"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE).stdout\n"
+                          "except OSError:o=b\"no\"\n"
+                          "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
+             :expect "ok"})))
+
+(defn- python-law?
+  "True for a python probe whose law is about python itself, so that an sh
+  runtime can prove it of the python3 it reaches."
+  [probe]
+  (not (false? (:lift probe))))
+
+(defn python-via-sh
+  "The sh probe for python probe pr: its script run by `python3 -c`, one
+  single-quoted word, needing what pr needs plus :interp/python3 and
+  :sh/single-quote. The cap is pr's own, so :py/pathlib proved here and
+  :py/pathlib proved by a python runtime state one law."
+  [{:keys [needs script] :as pr}]
+  (-> pr
+      (dissoc :lang :lift)
+      (assoc :needs (into [:interp/python3 :sh/single-quote] (remove #{:interp/python3 :sh/single-quote}) needs)
+             :script (str "python3 -c " (lit/sh-single script)))))
+
 (def probes
-  "Ordered so that every :needs is probed before the probes that rely on it.
-  Probe scripts avoid output redirection on purpose: a restricted shell
-  must still be able to answer every other question."
-  [{:cap :sh/printf       :needs []
-    :script "printf %s ok" :expect "ok"}
-   {:cap :sh/single-quote :needs [:sh/printf]
-    :script "printf %s 'o''k'" :expect "ok"}
-   {:cap :sh/double-quote :needs [:sh/printf]
-    :script "printf %s \"o\"\"k\"" :expect "ok"}
-   {:cap :sh/ansi-c-quote :needs [:sh/printf]
-    :script "printf %s $'\\157'k" :expect "ok"}
-   {:cap :sh/redirect     :needs [:sh/printf :sh/single-quote]
-    :script "eval ': >/dev/null' && printf %s ok" :expect "ok"}
-   {:cap :sh/pipe         :needs [:sh/printf :sh/single-quote]
-    :script "printf 'ok\\n' | { read -r x; printf %s \"$x\"; }" :expect "ok"}
-   {:cap :bin/tee         :needs [:sh/printf :sh/pipe]
-    :script "printf %s ok | tee" :expect "ok"}
-   {:cap :interp/sh       :needs [:sh/printf :sh/single-quote]
-    :script "sh -c 'printf %s ok'" :expect "ok"}
-   {:cap :interp/python3  :needs [:sh/single-quote]
-    :script "python3 -c 'print(\"ok\",end=\"\")'" :expect "ok"}
-   {:cap :py/sys          :needs [:interp/python3 :sh/single-quote]
-    :script "python3 -c 'import sys;sys.stdout.write(\"ok\")'" :expect "ok"}
-   {:cap :py/pathlib      :needs [:interp/python3 :sh/single-quote]
-    :script "python3 -c 'import pathlib,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
-   {:cap :py/subprocess   :needs [:interp/python3 :sh/single-quote]
-    :script "python3 -c 'import subprocess,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
-   {:cap :sh.wget/gnu     :needs [:sh/printf :sh/single-quote]
-    :doc "The wget the shell resolves is GNU Wget, which verifies TLS certificates. busybox wget rejects --version, so it prints no; so does a shell with no wget."
-    :script "case $(wget --version) in 'GNU Wget'*) printf %s ok;; *) printf %s no;; esac" :expect "ok"}
-   {:cap :py/urllib       :needs [:interp/python3 :sh/single-quote]
-    :script "python3 -c 'import shutil,sys,urllib.request;sys.stdout.write(\"ok\")'" :expect "ok"}])
+  "The sh probes: scripts for a runtime whose language is :sh. Ordered so
+  that every :needs is probed before the probes that rely on it. Probe
+  scripts avoid output redirection on purpose: a restricted shell must
+  still be able to answer every other question.
+
+  The :py/ and :py.os/ probes are not written here: each is a py-probe
+  run as `python3 -c '<the python probe>'`, so a :py/ cap names the same
+  law whether a python runtime proved it itself or a shell proved it of
+  the python3 it reaches."
+  (-> [{:cap :sh/printf       :needs []
+        :script "printf %s ok" :expect "ok"}
+       {:cap :sh/single-quote :needs [:sh/printf]
+        :script "printf %s 'o''k'" :expect "ok"}
+       {:cap :sh/double-quote :needs [:sh/printf]
+        :script "printf %s \"o\"\"k\"" :expect "ok"}
+       {:cap :sh/ansi-c-quote :needs [:sh/printf]
+        :script "printf %s $'\\157'k" :expect "ok"}
+       {:cap :sh/redirect     :needs [:sh/printf :sh/single-quote]
+        :script "eval ': >/dev/null' && printf %s ok" :expect "ok"}
+       {:cap :sh/pipe         :needs [:sh/printf :sh/single-quote]
+        :script "printf 'ok\\n' | { read -r x; printf %s \"$x\"; }" :expect "ok"}
+       {:cap :bin/tee         :needs [:sh/printf :sh/pipe]
+        :script "printf %s ok | tee" :expect "ok"}
+       {:cap :interp/sh       :needs [:sh/printf :sh/single-quote]
+        :script "sh -c 'printf %s ok'" :expect "ok"}
+       {:cap :interp/python3  :needs [:sh/single-quote]
+        :script "python3 -c 'print(\"ok\",end=\"\")'" :expect "ok"}]
+      (into (comp (filter python-law?) (map python-via-sh)) py-probes)
+      (conj {:cap :sh.wget/gnu     :needs [:sh/printf :sh/single-quote]
+             :doc "The wget the shell resolves is GNU Wget, which verifies TLS certificates. busybox wget rejects --version, so it prints no; so does a shell with no wget."
+             :script "case $(wget --version) in 'GNU Wget'*) printf %s ok;; *) printf %s no;; esac" :expect "ok"})))
 
 (defn judge
   "Verdict of one probe run. A run that never happened proves nothing."
@@ -95,9 +164,21 @@
                       (skip-evidence runtime-id probe profile unproven)
                       (run-evidence runtime-id probe (run! (:script probe)))))))
 
+(def catalog
+  "Every built-in probe, sh then python: what grammar.core's :core module
+  composes. discover! keeps the ones written in the runtime's language."
+  (into probes py-probes))
+
+(defn for-lang
+  "The probes of ps whose script is written in lang, in order."
+  [lang ps]
+  (filterv #(= lang (probe-lang %)) ps))
+
 (defn discover
   "Run every probe through run! (fn [script] -> {:argv :exit :out :err} or
-  {:argv :error}), in order, folding the evidence into a fresh profile."
+  {:argv :error}), in order, folding the evidence into a fresh profile.
+  probes are run as given, whatever their :lang; pick them with for-lang.
+  The 2-arity runs the sh probes."
   ([runtime-id run!] (discover runtime-id run! probes))
   ([runtime-id run! probes]
    (reduce (partial step runtime-id run!) (p/empty-profile runtime-id) probes)))
@@ -125,7 +206,7 @@
                     {:cap cap :needs [:sh/printf :sh/single-quote :sh/double-quote]
                      :script (sh-path-search prog q)
                      :expect "ok"})
-      ["bin" :python] {:cap cap :needs []
+      ["bin" :python] {:cap cap :lang :python :needs [:py/sys]
                        :script (str "import shutil,sys;sys.stdout.write('ok' if shutil.which("
                                     (lit/py-single prog) ") else 'no')")
                        :expect "ok"}
