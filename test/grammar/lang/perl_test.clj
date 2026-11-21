@@ -28,8 +28,12 @@
 ;; ---------------------------------------------------------------- runtimes
 
 (def perl-bin
-  "Host perl, canonical, so a symlink to it finds its own @INC."
-  (.getCanonicalPath (File. "/home/linuxbrew/.linuxbrew/bin/perl")))
+  "Host perl, canonical, so a symlink to it finds its own @INC: the linuxbrew
+  perl when present (dev host), else the first perl on the host PATH (CI)."
+  (let [brew (File. "/home/linuxbrew/.linuxbrew/bin/perl")]
+    (or (when (.canExecute brew) (.getCanonicalPath brew))
+        (fx/which "perl")
+        (throw (ex-info "no perl on this host" {})))))
 
 (def ^:private tools (assoc fx/tools :perl perl-bin))
 
