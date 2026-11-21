@@ -279,6 +279,23 @@
     (is (= :no (p/verdict after :bin/tee)) "shutil.which finds no tee file on PATH")
     (is (not= :ok (:status res)) "so :run of tee is never planned")))
 
+(deftest fs-probes-clean-up-and-ignore-proxies
+  (let [tmp (fx/tmp-dir! "grammar-probe-tmp-")
+        r (py-rt! :py-proxy [:sh] {"TMPDIR" tmp "http_proxy" "http://127.0.0.1:9/"
+                                   "HTTP_PROXY" "http://127.0.0.1:9/" "no_proxy" ""})
+        prof (g/discover! r)]
+    (doseq [cap [:py/open-write :py.os/mkdir :py.os/unlink :py/urllib]]
+      (is (= :yes (p/verdict prof cap)) (str cap (pr-str (get-in prof [:evidence (probe/evidence-id :py-proxy cap)])))))
+    (is (empty? (.list (File. ^String tmp))) "every probe removed what it made under TMPDIR"))
+  (testing "a cleanup the runtime refuses is kept as evidence, the verdict stays the law's"
+    (let [tmp (fx/tmp-dir! "grammar-probe-tmp-")
+          r (py-rt! :py-nounlink [:sh] {"TMPDIR" tmp
+                                        "PYTHONPATH" (site-dir! (audit-site ["os.remove"] false))})
+          prof (g/discover! r)
+          ev (get-in prof [:evidence (probe/evidence-id :py-nounlink :py/open-write)])]
+      (is (= :yes (p/verdict prof :py/open-write)))
+      (is (str/includes? (str (:err ev)) "cleanup failed, left") (pr-str ev)))))
+
 (def ^:private ascii-env {"LC_ALL" "C" "PYTHONUTF8" "0" "PYTHONCOERCECLOCALE" "0"})
 
 (deftest non-ascii-argv-under-an-ascii-locale

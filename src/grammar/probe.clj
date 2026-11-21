@@ -36,6 +36,17 @@
   (str "p=pathlib.Path(os.environ.get(\"TMPDIR\") or \"/tmp\","
        "\"grammar-probe-%d-%s\"%(os.getpid(),os.urandom(4).hex()))"))
 
+(defn- with-cleanup
+  "python lines running body (lines), then always the cleanup statement:
+  a cleanup that raises is written to stderr, naming the path it left,
+  so the evidence shows what the probe could not remove. The verdict
+  stays the law's: a refused cleanup is not a refuted write."
+  [cleanup & body]
+  (concat ["try:"] (map #(str " " %) body)
+          ["finally:"
+           (str " try:" cleanup)
+           " except Exception as c:sys.stderr.write(\"cleanup failed, left %s: %r\\n\"%(p,c))"]))
+
 (defn- guarded
   "python program that imports sys, then runs body (lines) after importing
   modules. Anything raised in there (a missing module, an OSError, a
@@ -83,21 +94,20 @@
    {:cap :py/pathlib :lang :python :needs [:py/sys]
     :script "import pathlib,sys;sys.stdout.write(\"ok\")" :expect "ok"}
    {:cap :py/open-write :lang :python :needs [:py/sys :py/pathlib]
-    :script (guarded "os,pathlib" py-scratch
-                     "p.write_bytes(b\"ok\")" "r=p.read_bytes()"
-                     "try:p.unlink()" "except Exception:pass"
-                     "sys.stdout.write(r.decode())")
+    :script (apply guarded "os,pathlib" py-scratch
+                   (with-cleanup "p.unlink(missing_ok=True)"
+                     "p.write_bytes(b\"ok\")" "sys.stdout.write(p.read_bytes().decode())"))
     :expect "ok"}
    {:cap :py.os/mkdir :lang :python :needs [:py/sys :py/pathlib]
-    :script (guarded "os,pathlib" py-scratch
-                     "p.mkdir(parents=True,exist_ok=True)" "r=\"ok\" if p.is_dir() else \"no\""
-                     "try:p.rmdir()" "except Exception:pass"
-                     "sys.stdout.write(r)")
+    :script (apply guarded "os,pathlib" py-scratch
+                   (with-cleanup "os.path.isdir(p) and p.rmdir()"
+                     "p.mkdir()" "sys.stdout.write(\"ok\" if p.is_dir() else \"no\")"))
     :expect "ok"}
    {:cap :py.os/unlink :lang :python :needs [:py/sys :py/pathlib]
-    :script (guarded "os,pathlib" py-scratch
-                     "os.symlink(\"grammar-probe-target\",p)" "p.unlink(missing_ok=True)"
-                     "sys.stdout.write(\"no\" if os.path.lexists(p) else \"ok\")")
+    :script (apply guarded "os,pathlib" py-scratch
+                   (with-cleanup "os.path.lexists(p) and p.unlink()"
+                     "os.symlink(\"grammar-probe-target\",p)" "p.unlink()"
+                     "sys.stdout.write(\"no\" if os.path.lexists(p) else \"ok\")"))
     :expect "ok"}
    {:cap :py/subprocess :lang :python :needs [:py/sys]
     :script (guarded "subprocess"
@@ -112,7 +122,8 @@
                      " c=s.accept()[0];c.recv(65536)"
                      " c.sendall(b\"HTTP/1.0 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok\");c.close()"
                      "threading.Thread(target=h,daemon=True).start()"
-                     "r=urllib.request.urlopen(\"http://127.0.0.1:%d/\"%s.getsockname()[1],timeout=5)"
+                     (str "r=urllib.request.build_opener(urllib.request.ProxyHandler({}))"
+                          ".open(\"http://127.0.0.1:%d/\"%s.getsockname()[1],timeout=5)")
                      "sys.stdout.write(r.read().decode())")
     :expect "ok"}
    {:cap :interp/sh :lang :python :lift false :needs [:py/sys :py/subprocess]
