@@ -76,7 +76,7 @@
   (let [fixed (concat ssh-base opts (when jump ["-J" jump]) ["--" dest])]
     {:id (keyword "ctx" (str (if jump "sh->ssh-jump." "sh->ssh.") (name route))) :outer :sh :inner :sh
      :cost (if jump 21 20)
-     :context (keyword "ssh" (name route)) :requires #{(reach-cap route)}
+     :context (keyword (if jump "ssh-jump" "ssh") (name route)) :requires #{(reach-cap route)}
      :inner-requires #{:sh/posix-words}
      :parses [:outer-sh :login-shell]
      :render (fn [env code] (words env fixed code))}))
@@ -89,19 +89,45 @@
   (check-dest! dest)
   (let [fixed (concat ssh-base opts (when jump ["-J" jump]) ["--" dest "sh"])]
     {:id (keyword "ctx" (str "sh->ssh-stdin." (name route))) :outer :sh :inner :sh :cost 24
-     :context (keyword "ssh" (name route)) :requires #{(reach-cap route) :sh/pipe :sh/printf}
+     :context (keyword "ssh-stdin" (name route)) :requires #{(reach-cap route) :sh/pipe :sh/printf}
      :parses [:outer-sh :login-shell-word-sh :sh-stdin]
      :render (fn [env code]
                (apply c/combine (fn [f & ws] (str "printf " f " | " (str/join " " ws)))
                       (lit-in env :sh (lit/printf-format code))
                       (map #(lit-in env :sh %) fixed)))}))
 
+(defn hop-tag
+  "The part of a context key one hop contributes: its wrapper id without
+  the ctx/ namespace, e.g. sh->ssh-stdin.n2c. Transport and route both
+  show, so a direct and a stdin hop to one host never share a profile."
+  [w]
+  (name (:id w)))
+
 (defn chain
-  "Hops ws (outermost first) linked for the planner: each hop's :from is
-  the context of the one before it, the first starts at the root. The
-  planner then reaches the last hop's context only through all of them."
+  "Hops ws (outermost first) linked for the planner. Each hop's :context
+  becomes a PATH key naming every hop from the root through it, e.g.
+  :hop/sh->ssh.n1>sh->sudo.root, so two chains ending in sudo on
+  different hosts, or a direct and a stdin hop to one host, never share
+  a profile. Each hop's :from is the path before it (nil: the root).
+  The planner then reaches the last context only through all of them."
   [ws]
-  (vec (map (fn [w from] (assoc w :from from)) ws (cons nil (map :context ws)))))
+  (first
+   (reduce (fn [[acc from tags] w]
+             (let [tags (conj tags (hop-tag w))
+                   k (keyword "hop" (str/join ">" tags))]
+               [(conj acc (assoc w :context k :from from :route-context (:context w))) k tags]))
+           [[] nil []]
+           ws)))
+
+(defn check-contexts!
+  "Refuse wrappers ws in which two context wrappers declare one :context:
+  the planner keeps one profile per context."
+  [ws]
+  (let [dups (keep (fn [[k n]] (when (< 1 n) k)) (frequencies (keep :context ws)))]
+    (when (seq dups)
+      (throw (ex-info "two hops declare one :context; link them with grammar.context/chain"
+                      {:contexts (vec (sort dups))})))
+    ws))
 
 (def default-lits
   "Literal encoders a hop renders with when no planner chose them: POSIX
