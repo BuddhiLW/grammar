@@ -30,11 +30,12 @@
 
 (defn- bad-entries
   "The realizations or wrappers in xs whose :id is not a keyword or whose
-  :cost, when given, is not a number >= 0, each as {:id :cost}."
+  :cost, when given, is not a number >= 0 (NaN is not: it compares false
+  both ways and would corrupt the queue order), each as {:id :cost}."
   [xs]
   (vec (for [x xs
              :let [cost (:cost x 0)]
-             :when (not (and (keyword? (:id x)) (number? cost) (not (neg? cost))))]
+             :when (not (and (keyword? (:id x)) (number? cost) (== cost cost) (not (neg? cost))))]
          (select-keys x [:id :cost]))))
 
 (defn make-env
@@ -58,26 +59,69 @@
 
 (declare candidates)
 
-(defn- render-env [env visited]
-  {:lit (fn [lang text] (candidates env visited lang [:lit text]))})
+(defn- beneath
+  "env for the candidates realization or wrapper x embeds: when x declares
+  :shortens? (its output may be shorter than a piece it embeds, breaking
+  the length law), :max-len pruning is off for everything under it."
+  [env x]
+  (cond-> env (:shortens? x) (assoc :prune? false)))
+
+(defn- render-env
+  "The env x's :render receives: its (:lit env) renders literals in visited,
+  beneath x."
+  [env visited x]
+  (let [env (beneath env x)]
+    {:lit (fn [lang text] (candidates env visited lang [:lit text]))}))
 
 (declare utf8-len)
 
-(defn- within-len
-  "cands without those whose code is longer than the profile's :max-len,
-  counting each one dropped in the env's :pruned volatile, when it has one.
+(defn- meter
+  "The work account of one search pass: candidates examined (:spent),
+  candidates pruned unexamined (:pruned) and the shortest of those
+  (:min-bytes). Both kinds of work count against budget."
+  [budget]
+  (volatile! {:budget budget :spent 0 :pruned 0 :min-bytes nil :cut false}))
 
-  Sound by the length law (see grammar.realize): no encoder or wrapper
-  output is shorter than the code it embeds, so every program built from a
-  candidate that is too long is too long as well."
+(defn- spent?
+  "True once meter m's examined plus pruned candidates reach its budget."
+  [m]
+  (let [{:keys [budget spent pruned]} @m]
+    (>= (+ spent pruned) budget)))
+
+(defn- charge-prune!
+  "Count one candidate of len bytes pruned in meter m."
+  [m len]
+  (vswap! m (fn [s] (-> s
+                        (update :pruned inc)
+                        (update :min-bytes #(if % (min % len) len))))))
+
+(defn- within-len
+  "cands without those whose code is longer than the profile's :max-len.
+  Each one dropped is charged to the env's :meter, and the seq ends once
+  the meter's budget is spent (marking it :cut), so pruning can never run
+  past the budget. Off when the env's :prune? is false, as it is beneath
+  an entry that declares :shortens?.
+
+  Sound by the length law (see grammar.realize): no encoder, realization
+  or wrapper output is shorter than what it embeds, so every program built
+  from a candidate that is too long is too long as well."
   [env cands]
-  (if-let [n (get-in env [:profile :text :max-len])]
-    (let [pruned (:pruned env)]
-      (filter (fn [cand]
-                (or (<= (utf8-len (:code cand)) n)
-                    (do (some-> pruned (vswap! inc)) false)))
-              cands))
-    cands))
+  (let [n (get-in env [:profile :text :max-len])
+        m (:meter env)]
+    (if (and n (:prune? env true))
+      (letfn [(step [cs]
+                (lazy-seq
+                 (if (some-> m spent?)
+                   (do (vswap! m assoc :cut true) nil)
+                   (when-let [s (seq cs)]
+                     (let [cand (first s)
+                           len (utf8-len (:code cand))]
+                       (if (<= len n)
+                         (cons cand (step (rest s)))
+                         (do (some-> m (charge-prune! len))
+                             (step (rest s)))))))))]
+        (step cands))
+      cands)))
 
 (defn- direct-entries
   "One bound per admitted realization of intent in lang, costing the
@@ -89,7 +133,7 @@
     (c/bound (c/weight r)
              [(c/realization-rank r)]
              #(map (fn [cand] (c/stamp cand r lang))
-                   ((:render r) (render-env env visited) intent)))))
+                   ((:render r) (render-env env visited r) intent)))))
 
 (defn- wrap
   "Ascending bounds, one per inner candidate (ascending itself), each
@@ -99,7 +143,7 @@
          (c/bound (+ (:cost w 0) (:cost ic))
                   (into [(c/wrapper-rank w)] (:key ic))
                   #(map (fn [oc] (c/enclose w ic oc))
-                        ((:render w) (render-env env visited) (:code ic)))))
+                        ((:render w) (render-env env visited w) (:code ic)))))
        inner-cands))
 
 (defn candidates
@@ -122,7 +166,7 @@
          (c/bound (:cost w 0)
                   [(c/wrapper-rank w)]
                   #(wrap env visited w
-                         (candidates env (conj visited (:inner w)) (:inner w) intent)))))))))
+                         (candidates (beneath env w) (conj visited (:inner w)) (:inner w) intent)))))))))
 
 (defn- stack-candidates
   "Candidates for an explicitly requested context stack, outermost first,
@@ -131,7 +175,7 @@
   (if-let [inner (first more)]
     (let [w (first (filter #(and (= lang (:outer %)) (= inner (:inner %))) (:wrappers env)))]
       (if (and w ((:admit env) (:requires w)))
-        (within-len env (c/best-first [(c/stream (wrap env #{lang} w (stack-candidates env more intent)))]))
+        (within-len env (c/best-first [(c/stream (wrap env #{lang} w (stack-candidates (beneath env w) more intent)))]))
         ()))
     (within-len env (c/best-first (direct-entries env #{lang} lang intent)))))
 
@@ -147,26 +191,36 @@
                    {:constraint :forbid :text t}))
       (and max-len (> n max-len)) (conj {:constraint :max-len :limit max-len :actual n}))))
 
-(defn- search [cands text budget]
-  (loop [cs (seq cands) n 0 rejected []]
-    (cond
-      (nil? cs) {:searched n :rejected rejected}
-      (>= n budget) {:searched n :rejected rejected :budget-exhausted true}
-      :else (let [cand (first cs)
-                  vs (violations text (:code cand))]
-              (if (empty? vs)
-                {:found cand :searched (inc n) :rejected rejected}
-                (recur (next cs) (inc n)
-                       (cond-> rejected
-                         (< (count rejected) 5) (conj {:via (:via cand) :violations vs}))))))))
+(defn- search
+  "Examine cands in order until one satisfies text, counting each examined
+  candidate in meter m. Stops with :budget-exhausted once the examined and
+  pruned candidates together reach m's budget."
+  [cands text m]
+  (loop [cs cands rejected []]
+    (let [s (when-not (spent? m) (seq cs))
+          n (:spent @m)]
+      (cond
+        (and (nil? s) (or (spent? m) (:cut @m))) {:searched n :rejected rejected :budget-exhausted true}
+        (nil? s) {:searched n :rejected rejected}
+        :else (let [cand (first s)
+                    vs (violations text (:code cand))]
+                (vswap! m update :spent inc)
+                (if (empty? vs)
+                  {:found cand :searched (inc n) :rejected rejected}
+                  (recur (rest s)
+                         (cond-> rejected
+                           (< (count rejected) 5) (conj {:via (:via cand) :violations vs})))))))))
 
 (defn- run-pass
-  "search over the candidates gen yields under env, with :pruned, how many
-  candidates the :max-len bound dropped before they were searched."
+  "search over the candidates gen yields under env, metered against budget:
+  :pruned counts the candidates the :max-len bound dropped unexamined and
+  :pruned-min-bytes is the shortest of them."
   [env gen text budget]
-  (let [pruned (volatile! 0)
-        res (search (gen (assoc env :pruned pruned)) text budget)]
-    (assoc res :pruned @pruned)))
+  (let [m (meter budget)
+        res (search (gen (assoc env :meter m)) text m)
+        {:keys [pruned min-bytes]} @m]
+    (cond-> (assoc res :pruned pruned)
+      min-bytes (assoc :pruned-min-bytes min-bytes))))
 
 ;; ---------------------------------------------------------------- explanation
 
@@ -203,6 +257,15 @@
 
 ;; ---------------------------------------------------------------- entry point
 
+(defn- work
+  "The work diagnostics of search results passes: :pruned summed, the
+  least :pruned-min-bytes, and :budget-exhausted when any pass ran out."
+  [passes]
+  (let [mins (keep :pruned-min-bytes passes)]
+    (cond-> {:pruned (transduce (map :pruned) + 0 passes)}
+      (seq mins) (assoc :pruned-min-bytes (reduce min mins))
+      (some :budget-exhausted passes) (assoc :budget-exhausted true))))
+
 (defn- not-ok
   "The Result when the strict pass found nothing: :blocked-on-unknown when
   the relaxed pass (unknowns let through) finds a program, else
@@ -213,8 +276,8 @@
   (let [profile (:profile env)
         text-ev (vec (:evidence text))
         relaxed (run-pass (assoc env :admit #(p/not-refuted? profile %)) gen text budget)
-        base (assoc base :searched (:searched strict) :explain rows
-                    :pruned (+ (:pruned strict) (:pruned relaxed)))]
+        base (merge (assoc base :searched (:searched strict) :explain rows)
+                    (work [strict relaxed]))]
     (if-let [f (:found relaxed)]
       (assoc base
              :status :blocked-on-unknown
@@ -229,13 +292,18 @@
 
 (defn solve
   "Plan intent in lang under env. opts: :stack (force a context stack,
-  outermost first; overrides lang), :budget (max candidates examined).
-  Always returns a grammar.schema/Result.
+  outermost first; overrides lang), :budget (max candidates per search
+  pass, examined plus pruned, default 5000). Always returns a
+  grammar.schema/Result.
 
-  :searched, :rejected and :pruned are diagnostics, not contract: how many
-  candidates the strict pass examined, the first ones it rejected, and how
-  many both passes dropped unexamined because their code already exceeded
-  :max-len. Pruning changes them, never the chosen program."
+  :searched, :rejected, :pruned and :pruned-min-bytes are diagnostics, not
+  contract: how many candidates the strict pass examined, the first ones it
+  rejected, how many both passes dropped unexamined because their code
+  already exceeded :max-len, and the shortest of those. A pass that reaches
+  its budget stops and the Result says :budget-exhausted. Pruning changes
+  the diagnostics, never the chosen program, as long as no pass reaches
+  its budget: past it, a pruned search may stop at a different point than
+  an unpruned one would."
   ([env lang intent] (solve env lang intent {}))
   ([env lang intent {:keys [stack budget] :or {budget 5000}}]
    (let [profile (:profile env)
@@ -252,15 +320,14 @@
                     (explain env (reachable-langs env lang) intent nil))
              base {:intent intent :lang lang :profile (:id profile)
                    :unknowns (->> rows (mapcat :unknown) distinct sort vec)}
-             {:keys [found searched pruned] :as strict} (run-pass env gen text budget)]
+             {:keys [found searched] :as strict} (run-pass env gen text budget)]
          (if found
-           (assoc base
+           (assoc (merge base (work [strict]))
                   :status :ok
                   :code (:code found)
                   :realization (:via found)
                   :stack (:stack found)
                   :searched searched
-                  :pruned pruned
                   :constraints {:requires (vec (sort (:requires found)))
                                 :text (select-keys text [:max-len :forbid])
                                 :bytes (utf8-len (:code found))}

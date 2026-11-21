@@ -84,15 +84,45 @@
 
 (deftest pruned-counts-only-what-max-len-drops
   (is (= 0 (:pruned (g/plan full :sh wf))) "no :max-len, nothing pruned")
-  (testing "with both quotes forbidden, the 12 programs that fit 60 bytes
-            are searched and rejected; the longer ones are pruned unbuilt"
+  (testing "with both quotes forbidden, the programs that fit 60 bytes are
+            searched and rejected; the longer ones are pruned unbuilt"
     (let [prof (-> full (p/declare-text :forbid #{"'" "\""} "test") (p/declare-text :max-len 60 "test"))
           res (g/plan prof :sh wf)]
       (is (= :unsatisfiable (:status res)))
-      (is (= 12 (:searched res)))
+      (is (pos? (:searched res)) "some programs fit and reach the text check")
+      (is (< 60 (:pruned-min-bytes res)) "everything pruned was over the limit")
+      (is (not (:budget-exhausted res)))
       (is (every? #(every? #{:forbid} (map :constraint (:violations %))) (:rejected res))
           "a rejection is never for length: those are pruned before the check")
       (is (pos? (:pruned res))))))
+
+(defn- within-ms
+  "The value of (f) when it returns within ms, else ::timeout."
+  [ms f]
+  (let [fut (future (f))
+        v (deref fut ms ::timeout)]
+    (when (= v ::timeout) (future-cancel fut))
+    v))
+
+(deftest pruned-candidates-count-against-the-budget
+  (let [prof (p/declare-text full :max-len 30 "test")
+        words [:run {:argv (into ["echo"] (repeat 10 "abcdefgh"))}]]
+    (testing "a product too long at every level stops at the budget, quickly"
+      (let [res (within-ms 10000 #(g/plan prof :sh words))]
+        (is (map? res) "the search ends; before the fix it pruned 362530 candidates in 20 s")
+        (when (map? res)
+          (is (= :unsatisfiable (:status res)))
+          (is (:budget-exhausted res))
+          (is (<= (+ (:searched res) (:pruned res)) (* 2 5000)) "each of the two passes stops at 5000"))))
+    (testing "an explicit budget bounds pruned work too"
+      (let [res (within-ms 10000 #(g/plan prof :sh words {:budget 1}))]
+        (is (map? res))
+        (when (map? res)
+          (is (:budget-exhausted res))
+          (is (<= (+ (:searched res) (:pruned res)) 2)))))
+    (testing "the shortest pruned length says why nothing fit"
+      (let [res (g/plan prof :sh [:run {:argv ["echo" (apply str (repeat 4 "abcdefgh"))]}])]
+        (is (< 30 (:pruned-min-bytes res)))))))
 
 (deftest every-result-carries-its-justification
   (doseq [prof [full

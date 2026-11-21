@@ -126,6 +126,8 @@
    [:explain {:optional true} [:vector :map]]
    [:searched {:optional true} :int]
    [:pruned {:optional true} :int]
+   [:pruned-min-bytes {:optional true} :int]
+   [:budget-exhausted {:optional true} :boolean]
    [:errors {:optional true} :any]])
 
 (defn intent? [x] (m/validate Intent x))

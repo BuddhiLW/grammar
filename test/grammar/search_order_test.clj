@@ -97,6 +97,8 @@
     (testing "a cost that is not a number"
       (is (= {:wrappers [{:id :w/s :cost "5"}]}
              (:invalid (refusal #(solve/make-env prof {:wrappers [{:id :w/s :cost "5" :outer :sh :inner :sh}]}))))))
+    (testing "a NaN cost"
+      (is (= [:x/nan] (map :id (:realizations (:invalid (refusal #(solve/make-env prof {:realizations [(assoc ok :id :x/nan :cost ##NaN)]}))))))))
     (testing "an id that is not a keyword"
       (is (= {:realizations [{:id "x/str" :cost 1}]}
              (:invalid (refusal #(solve/make-env prof {:realizations [ok (assoc ok :id "x/str")]}))))))
