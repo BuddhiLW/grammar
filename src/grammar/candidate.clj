@@ -7,7 +7,16 @@
   {:code     program text
    :via      realization and wrapper ids, pre-order
    :requires every capability the text relies on
-   :stack    languages from outermost to innermost}")
+   :stack    languages from outermost to innermost
+   :cost     structural cost, a number >= 0: realization and wrapper costs
+             summed, a literal encoder adding 0
+   :key      the ranks on the way in pre-order, each [kind cost id], kind
+             0 for a realization and 1 for a wrapper; it orders equal costs}
+
+  Every key is mandatory: stamp, enclose and merge-parts add to :cost and
+  :key, so a hand-built candidate without them throws. Ranks come from
+  realization-rank and wrapper-rank and queue entries from bound and
+  stream, so the [kind cost id] grammar of keys is written only here.")
 
 (defn leaf
   "A single candidate from an encoder result, or none when it returned nil.
@@ -41,14 +50,20 @@
   {:q (sorted-set-by entry-cmp) :n 0})
 
 (defn push
-  "queue with entry e added; nil leaves it unchanged. Entries of equal rank
-  pop in the order they were pushed."
-  [queue e]
-  (if e
-    (-> queue
-        (update :q conj (assoc e :n (:n queue)))
-        (update :n inc))
-    queue))
+  "queue with entry e added, numbered n, by default the queue's insertion
+  count; nil leaves it unchanged. Entries of equal :cost and :key pop by
+  number, so in push order when numbered by default.
+
+  That FIFO is the queue's, not best-first's: a popped bound re-enters as a
+  stream with a fresh number. Pre-order among equal costs in best-first
+  rests on keys being unique, not on push order."
+  ([queue e] (push queue e (:n queue)))
+  ([queue e n]
+   (if e
+     (-> queue
+         (update :q conj (assoc e :n n))
+         (update :n inc))
+     queue)))
 
 (defn pop-min
   "[e rest] for the least entry e of queue and the queue without it, or nil
@@ -136,32 +151,48 @@
 
 (defn- tuple-entry
   "The queue entry for index tuple t over the vector of candidate seqs vs,
-  numbered by t, or nil when a coordinate runs past its seq."
+  carrying t as :t, or nil when a coordinate runs past its seq."
   [f vs t]
   (let [parts (map-indexed (fn [i j] (nth (vs i) j nil)) t)]
     (when (every? some? parts)
-      (assoc (merge-parts f parts) :n t))))
+      (assoc (merge-parts f parts) :t t))))
 
 (defn- walk-tuples
-  "Lazy seq of the candidates of queue q, a sorted set of tuple entries,
-  each popped entry replaced by the entries of its successor tuples."
-  [f vs q]
+  "Lazy seq of the candidates of queue, a queue of tuple entries. popped,
+  the entry emitted just before, is replaced by the entries of its successor
+  tuples only when the next element is asked for, so no input seq is
+  realized ahead of the output."
+  [f vs queue popped]
   (lazy-seq
-   (when-let [e (first q)]
-     (cons (dissoc e :n)
-           (walk-tuples f vs (into (disj q e)
-                                   (keep #(tuple-entry f vs %))
-                                   (successors (:n e))))))))
+   (let [queue (reduce (fn [q t] (push q (tuple-entry f vs t) t))
+                       queue
+                       (when popped (successors (:t popped))))]
+     (when-let [[e queue] (pop-min queue)]
+       (cons (dissoc e :t) (walk-tuples f vs queue e))))))
+
+(defn best-first-product
+  "Lazy product of the candidate seqs in seqs, cheapest total cost first.
+  Each seq must be ascending by :cost. f receives the codes and returns the
+  combined code. Ties pop by key, then by index tuple, so the walk is
+  deterministic. An element of an input seq is realized only once an
+  output needs it."
+  [f seqs]
+  (let [vs (vec seqs)
+        zero (vec (repeat (count vs) 0))]
+    (lazy-seq (walk-tuples f vs (push empty-queue (tuple-entry f vs zero) zero) nil))))
+
+(def ^:dynamic *product*
+  "How combine builds a product: (fn [f seqs] candidates). Default
+  best-first-product. The seam a reference test binds to the full,
+  unordered product, to check the search against an enumeration that does
+  not share its ordering code."
+  best-first-product)
 
 (defn combine
-  "Lazy product of candidate seqs, cheapest total cost first. Each seq must
-  be ascending by :cost. f receives the codes and returns the combined code.
-  Ties pop by key, then by index tuple, so the walk is deterministic."
+  "Lazy product of candidate seqs, cheapest total cost first (see
+  best-first-product, the default *product*)."
   [f & seqs]
-  (let [vs (vec seqs)]
-    (walk-tuples f vs (into (sorted-set-by entry-cmp)
-                            (keep #(tuple-entry f vs %))
-                            [(vec (repeat (count vs) 0))]))))
+  (*product* f seqs))
 
 (defn weight
   "What realization r adds to a candidate's :cost: its :cost, except a
@@ -169,13 +200,50 @@
   [r]
   (if (= :lit (:intent r)) 0 (:cost r 0)))
 
+(defn realization-rank
+  "The key rank of realization r: [0 cost id]."
+  [r]
+  [0 (:cost r 0) (:id r)])
+
+(defn wrapper-rank
+  "The key rank of wrapper w: [1 cost id], after every realization of equal
+  cost, so a direct realization wins a tie against a delegation."
+  [w]
+  [1 (:cost w 0) (:id w)])
+
+(defn bound
+  "A queue entry costing cost, ranked by key, that opens (open) only when it
+  reaches the front: open returns an ascending seq of entries, each costing
+  at least cost and keyed under key."
+  [cost key open]
+  {:cost cost :key key :open open})
+
+(defn stream
+  "A queue entry over s, an ascending seq of entries, realized one element
+  at a time. cost and key rank it until its head is realized."
+  ([s] (stream 0 [] s))
+  ([cost key s] {:cost cost :key key :stream s}))
+
 (defn stamp
   "Attribute cand to realization r rendered in lang: r's weight is added and
-  its rank [0 cost id] leads the key."
+  its rank leads the key."
   [cand r lang]
   (-> cand
       (update :via #(into [(:id r)] %))
       (update :requires into (:requires r))
       (update :stack #(if (seq %) % [lang]))
       (update :cost + (weight r))
-      (update :key #(into [[0 (:cost r 0) (:id r)]] %))))
+      (update :key #(into [(realization-rank r)] %))))
+
+(defn enclose
+  "The candidate of wrapper w around inner candidate ic, oc being the
+  candidate w rendered for ic's code in w's outer language: oc's code,
+  provenance in pre-order (w, then ic, then oc), w's cost added to both,
+  w's rank leading the key."
+  [w ic oc]
+  {:code (:code oc)
+   :via (into [(:id w)] (concat (:via ic) (:via oc)))
+   :requires (into (set (:requires w)) (concat (:requires ic) (:requires oc)))
+   :stack (into [(:outer w)] (:stack ic))
+   :cost (+ (:cost w 0) (:cost ic) (:cost oc))
+   :key (into [(wrapper-rank w)] (concat (:key ic) (:key oc)))})

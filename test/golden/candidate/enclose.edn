@@ -1,0 +1,7 @@
+{:around
+ {:code "outer",
+  :via [:w/sh->py :p/a :s/lit],
+  :requires [:cap/i :cap/o :cap/w],
+  :stack [:sh :python],
+  :cost 8,
+  :key [[1 5 :w/sh->py] [0 1 :p/a] [0 1 :s/lit]]}}

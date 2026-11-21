@@ -153,7 +153,17 @@ behind it: the probe script, exit status, stdout, stderr, or a declared reason.
 `:status`, `:realization` (ids, pre-order), `:stack`, `:constraints`
 (`:requires`, text constraints, byte length), `:evidence` (ids into the
 profile), `:unknowns`, and on failure `:explain` (every option, its required
-caps split by verdict) and `:rejected` (text-constraint violations).
+caps split by verdict) and `:rejected` (the first text-constraint violations
+among the candidates examined).
+
+Search diagnostics, not contract: `:searched` (candidates examined),
+`:pruned` (candidates dropped unexamined because their code already exceeded
+`:max-len`; no wrapper or encoder shortens what it embeds, see `grammar.law`)
+and `:pruned-min-bytes` (the shortest of those, which says by how much the
+limit was missed). A length refusal therefore shows in `:pruned-min-bytes`,
+not in `:rejected`. Examined and pruned candidates both count against
+`:budget` (default 5000 per pass); a pass that reaches it sets
+`:budget-exhausted`.
 
 ## Use
 

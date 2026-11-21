@@ -36,10 +36,39 @@
   "An ascending vector of small costs."
   (gen/fmap #(vec (sort %)) (gen/vector (gen/choose 0 5) 0 4)))
 
+(defn- keyed
+  "Candidates named prefix0.. with the given ascending costs, each keyed by
+  its own realization rank."
+  [prefix costs]
+  (map-indexed (fn [j k] (let [id (keyword (str prefix j))]
+                           (cand (name id) k [(c/realization-rank {:id id :cost k})])))
+               costs))
+
 (def gen-combine-args
-  "[f s1 .. sk] for combine: k ascending seqs whose codes name their position."
-  (gen/fmap (fn [cs] (into [vector] (map-indexed (fn [i costs] (ascending (str "s" i "-") costs)) cs)))
+  "[f s1 .. sk] for combine: k ascending, keyed seqs whose codes name their
+  position."
+  (gen/fmap (fn [cs] (into [vector] (map-indexed (fn [i costs] (keyed (str "s" i "-") costs)) cs)))
             (gen/vector gen-costs 0 3)))
+
+(defn- key-cmp
+  "Order on keys: rank by rank, a proper prefix first."
+  [a b]
+  (or (first (remove zero? (map compare a b)))
+      (compare (count a) (count b))))
+
+(defn- rank-order
+  "Comparator on candidates: :cost, then :key."
+  [a b]
+  (let [k (compare (:cost a) (:cost b))]
+    (if (zero? k) (key-cmp (:key a) (:key b)) k)))
+
+(defn product-oracle
+  "Reference combine: the full product in index-tuple order, stably sorted
+  by :cost, then :key."
+  [f & seqs]
+  (->> (reduce (fn [acc s] (for [xs acc x s] (conj xs x))) [[]] seqs)
+       (map #(c/merge-parts f %))
+       (sort rank-order)))
 
 (def ^:private orig-merge-parts c/merge-parts)
 (def ^:private orig-combine c/combine)
@@ -120,17 +149,73 @@
            (= (count codes) (count (distinct codes)))
            (= (count codes) (reduce * 1 (map count seqs)))))))
 
+(defspec combine-is-the-sorted-product 100
+  (prop/for-all [[f & seqs] gen-combine-args]
+    (= (map (juxt :code :cost :key) (apply product-oracle f seqs))
+       (map (juxt :code :cost :key) (apply c/combine f seqs)))))
+
 (deftest combine-is-lazy
-  (let [n (atom 0)]
-    (is (= ["a0b0" "a1b0"] (map :code (take 2 (c/combine str (counting n "a" identity) (ascending "b" [0]))))))
-    (is (< @n 5) "an infinite ascending seq is realized only as far as needed")))
+  (let [b (ascending "b" [0])]
+    (testing "nothing is realized before the first element is asked for"
+      (let [n (atom 0)]
+        (c/combine str (counting n "a" identity) b)
+        (is (= 0 @n))))
+    (testing "the k-th output realizes exactly k elements of an input that grows by one per output"
+      (doseq [k [1 2 5]]
+        (let [n (atom 0)]
+          (is (= (map #(str "a" % "b0") (range k))
+                 (map :code (take k (c/combine str (counting n "a" identity) b)))))
+          (is (= k @n)))))))
 
 ;; ---------------------------------------------------------------- best-first
 
 (defn- bound
   "A bound at cost and key opening cands, counting opens in atom opened."
   [cost key opened cands]
-  {:cost cost :key key :open #(do (swap! opened inc) cands)})
+  (c/bound cost key #(do (swap! opened inc) cands)))
+
+(def gen-tree
+  "Entry trees: [:cand dc], or [:bound dc children] / [:stream dc children],
+  dc the cost added over the parent's."
+  (gen/recursive-gen
+   (fn [inner]
+     (gen/tuple (gen/elements [:bound :stream]) (gen/choose 0 3) (gen/vector inner 0 3)))
+   (gen/tuple (gen/return :cand) (gen/choose 0 3))))
+
+(defn build
+  "The entry for tree node, under a parent costing base and keyed pkey, at
+  path: its cost is base plus dc, its key pkey plus its own unique rank, and
+  a bound or stream opens its children, sorted ascending."
+  [base pkey path [kind dc children]]
+  (let [cost (+ base dc)
+        id (keyword (apply str "n" (interpose "." path)))
+        key (conj pkey (c/realization-rank {:id id :cost cost}))
+        kids #(sort rank-order (map-indexed (fn [i ch] (build cost key (conj path i) ch)) children))]
+    (case kind
+      :cand (cand (name id) cost key)
+      :bound (c/bound cost key kids)
+      :stream (c/stream cost key (kids)))))
+
+(def gen-entries
+  "Queue entries built from 0 to 4 trees: candidates, bounds and streams,
+  nested, with unique keys."
+  (gen/fmap (fn [trees] (vec (map-indexed (fn [i t] (build 0 [] [i] t)) trees)))
+            (gen/vector gen-tree 0 4)))
+
+(defn leaves
+  "Every candidate under entries, opening every bound and stream."
+  [entries]
+  (mapcat (fn [e]
+            (case (c/entry-kind e)
+              :candidate [e]
+              :bound (leaves ((:open e)))
+              :stream (leaves (:stream e))))
+          entries))
+
+(defspec best-first-is-the-sorted-flattening 200
+  (prop/for-all [es gen-entries]
+    (= (map (juxt :code :cost) (sort rank-order (leaves es)))
+       (map (juxt :code :cost) (c/best-first es)))))
 
 (deftrifecta best-first
   grammar.candidate/best-first
@@ -147,8 +232,7 @@
            :empty-stream [{:cost 0 :key [] :stream []} (cand "z" 1)]
            :empty []}
    :xf #(mapv (juxt :code :cost) %)
-   :gen (gen/fmap (fn [costs] (shuffle (map-indexed #(cand (str "c" %1) %2) costs)))
-                  (gen/vector (gen/choose 0 9) 0 8))
+   :gen gen-entries
    :pred ascending?
    :mutations [["reversed" (fn [es] (reverse (orig-best-first es)))]
                ["candidates-only" (fn [es] (sort-by :cost (remove #(or (:open %) (contains? % :stream)) es)))]
@@ -167,13 +251,14 @@
     (let [n (atom 0)
           out (c/best-first [{:cost 0 :key [] :stream (counting n "s" #(* 2 %))} (cand "odd" 3)])]
       (is (= ["s0" "s1" "odd" "s2"] (map :code (take 4 out))))
-      (is (< @n 6))))
+      (is (= 3 @n) "s0, s1 and s2, nothing past the last element taken")))
   (testing "an unreached bound behind an infinite cheaper stream is never opened"
     (let [opened (atom 0)
           n (atom 0)]
       (is (= 50 (count (take 50 (c/best-first [{:cost 0 :key [] :stream (counting n "s" (constantly 0))}
                                                (bound 1 [] opened [])])))))
-      (is (= 0 @opened)))))
+      (is (= 0 @opened))
+      (is (= 50 @n)))))
 
 ;; ---------------------------------------------------------------- queue and entries
 
@@ -202,3 +287,55 @@
     (is (= :stream (c/entry-kind s)))
     (is (= [(cand "x" 1)] (:stream s)))
     (is (not (contains? s :open)))))
+
+;; ---------------------------------------------------------------- attribution
+
+(def ^:private orig-stamp c/stamp)
+(def ^:private orig-enclose c/enclose)
+
+(def ^:private realization {:id :r/x :intent :str :lang :sh :cost 3 :requires #{:cap/r}})
+(def ^:private literal {:id :r/lit :intent :lit :lang :sh :cost 2 :requires #{}})
+(def ^:private wrapper {:id :w/sh->py :outer :sh :inner :python :cost 5 :requires #{:cap/w}})
+
+(deftrifecta stamp
+  grammar.candidate/stamp
+  {:golden-path "test/golden/candidate/stamp.edn"
+   :apply? true
+   :cases {:leaf [(first (c/leaf "x")) realization :sh]
+           :literal-adds-nothing [(first (c/leaf "x")) literal :sh]
+           :keeps-inner-stack [(assoc (cand "y" 1 [[0 1 :inner]]) :requires #{:cap/y} :stack [:perl])
+                               realization :sh]}
+   :xf #(update % :requires (comp vec sort))
+   :mutations [["key-after" (fn [cd r l] (update (orig-stamp cd r l) :key (comp vec reverse)))]
+               ["no-weight" (fn [cd r l] (assoc (orig-stamp cd r l) :cost (:cost cd)))]
+               ["wrapper-rank" (fn [cd r l] (assoc-in (orig-stamp cd r l) [:key 0 0] 1))]
+               ["stack-forced" (fn [cd r l] (assoc (orig-stamp cd r l) :stack [l]))]]})
+
+(deftrifecta enclose
+  grammar.candidate/enclose
+  {:golden-path "test/golden/candidate/enclose.edn"
+   :apply? true
+   :cases {:around [wrapper
+                    {:code "inner" :via [:p/a] :requires #{:cap/i} :stack [:python] :cost 1 :key [[0 1 :p/a]]}
+                    {:code "outer" :via [:s/lit] :requires #{:cap/o} :stack [:sh] :cost 2 :key [[0 1 :s/lit]]}]}
+   :xf #(update % :requires (comp vec sort))
+   :mutations [["outer-cost-dropped" (fn [w ic oc] (assoc (orig-enclose w ic oc) :cost (+ (:cost w) (:cost ic))))]
+               ["via-order" (fn [w ic oc] (update (orig-enclose w ic oc) :via (comp vec reverse)))]
+               ["realization-rank" (fn [w ic oc] (assoc-in (orig-enclose w ic oc) [:key 0 0] 0))]
+               ["inner-code" (fn [w ic oc] (assoc (orig-enclose w ic oc) :code (:code ic)))]]})
+
+(deftest ranks-and-entries
+  (is (= [0 3 :r/x] (c/realization-rank realization)))
+  (is (= [1 5 :w/sh->py] (c/wrapper-rank wrapper)))
+  (is (= [0 0 :r/none] (c/realization-rank {:id :r/none})) "a missing :cost ranks as 0")
+  (is (neg? (compare (c/realization-rank {:id :b :cost 9}) (c/wrapper-rank {:id :a :cost 0})))
+      "a realization ranks before a wrapper whatever their costs")
+  (is (= [1 0 :w/none] (c/wrapper-rank {:id :w/none})) "a missing :cost ranks as 0")
+  (is (= 0 (c/weight {:id :r/none :intent :str})) "a missing :cost weighs 0")
+  (is (= 1 (:cost (c/enclose {:id :w/none :outer :sh} (cand "i" 1) (cand "o" 0))))
+      "a wrapper without :cost adds 0")
+  (let [open (constantly [])]
+    (is (= {:cost 1 :key [[0]] :open open} (c/bound 1 [[0]] open))))
+  (is (= :bound (c/entry-kind (c/bound 1 [] (constantly [])))))
+  (is (= {:cost 0 :key [] :stream [1]} (c/stream [1])))
+  (is (= {:cost 2 :key [[0]] :stream nil} (c/stream 2 [[0]] nil))))

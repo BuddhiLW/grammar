@@ -14,7 +14,18 @@
   delegation and for an explicitly requested stack.
 
   :render receives an env whose (:lit env) is (fn [lang s] candidates) and
-  returns a lazy seq of candidates (see grammar.candidate)."
+  returns a lazy seq of candidates (see grammar.candidate), ascending by
+  :cost: best-first takes the first one's cost as a lower bound for the
+  rest. grammar.candidate/leaf and grammar.candidate/combine both return
+  such seqs. A realization's :cost and a wrapper's :cost are numbers >= 0
+  and every :id is a keyword; grammar.solve/make-env refuses anything else.
+
+  Length law: no output is shorter, in UTF-8 bytes, than the text an
+  encoder encodes or than any piece a realization or wrapper embeds. The
+  solver relies on it to drop a candidate already over the profile's
+  :max-len together with everything that would be built from it. It is
+  grammar.law/length-law-violations, checked over this registry by
+  grammar.length-law-test; an entry that breaks it declares :shortens?."
   (:require [grammar.candidate :as c]
             [grammar.lit :as lit]
             [clojure.string :as str]))
