@@ -205,7 +205,9 @@
         ;; a direct hop into fish or csh may garble or refuse; what must
         ;; hold is that the planner can never pick it: the posix-words
         ;; probe sent through every hostile hop of the chain fails
-        (every? (fn [k] (not= (:expect posix-probe) (r/out-string (r/run world :sh (encode* env [k] (:script posix-probe))))))
+        ;; (the probe is sent with POSIX single quotes, as the planner sends it)
+        (every? (fn [k] (not= (:expect posix-probe)
+                              (r/out-string (r/run world :sh (cx/render-with (all-hops k) (:script posix-probe))))))
                 (filter hostile-hops ks))
         (and (nil? (:error res)) (= s (r/out-string res)))))))
 
