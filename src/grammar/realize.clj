@@ -51,9 +51,11 @@
 (defn py-bytes
   "python expression for the UTF-8 bytes of python str expression e. An
   argv word handed to subprocess as bytes is never encoded with the
-  locale, so a non-ASCII word survives LC_ALL=C with PYTHONUTF8=0."
+  locale, so a non-ASCII word survives LC_ALL=C with PYTHONUTF8=0.
+  str.encode() with no argument is UTF-8 whatever the locale, and adds no
+  quote character, so a policy forbidding quotes still admits it."
   [e]
-  (str "(" e ").encode(\"utf-8\")"))
+  (str "(" e ").encode()"))
 
 (defn- py-path
   "python expression for a pathlib.Path naming the UTF-8 bytes of python str

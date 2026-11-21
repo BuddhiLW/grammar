@@ -3,7 +3,7 @@
   :needs
   [:py/sys :py/stdout-buffer :py/subprocess :interp/sh :sh/printf],
   :script
-  "import sys\ntry:\n import subprocess\n o=subprocess.run([b\"sh\",b\"-c\",(\"sh -c 'printf %s ok'\").encode(\"utf-8\")],stdout=subprocess.PIPE).stdout\n sys.stdout.buffer.write(o);sys.stdout.buffer.flush()\nexcept Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")",
+  "import sys\ntry:\n import subprocess\n o=subprocess.run([b\"sh\",b\"-c\",(\"sh -c 'printf %s ok'\").encode()],stdout=subprocess.PIPE).stdout\n sys.stdout.buffer.write(o);sys.stdout.buffer.flush()\nexcept Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")",
   :expect "ok",
   :lang :python,
   :lift false},
@@ -11,7 +11,7 @@
  {:cap :sh/printf,
   :needs [:py/sys :py/stdout-buffer :py/subprocess :interp/sh],
   :script
-  "import sys\ntry:\n import subprocess\n o=subprocess.run([b\"sh\",b\"-c\",(\"printf %s ok\").encode(\"utf-8\")],stdout=subprocess.PIPE).stdout\n sys.stdout.buffer.write(o);sys.stdout.buffer.flush()\nexcept Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")",
+  "import sys\ntry:\n import subprocess\n o=subprocess.run([b\"sh\",b\"-c\",(\"printf %s ok\").encode()],stdout=subprocess.PIPE).stdout\n sys.stdout.buffer.write(o);sys.stdout.buffer.flush()\nexcept Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")",
   :expect "ok",
   :lang :python,
   :lift false},
@@ -20,7 +20,7 @@
   :needs
   [:py/sys :py/stdout-buffer :py/subprocess :interp/sh :sh/printf],
   :script
-  "import sys\ntry:\n import subprocess\n o=subprocess.run([b\"sh\",b\"-c\",(\"printf %s \\\"o\\\"'k' \\\\ $HOME\").encode(\"utf-8\")],stdout=subprocess.PIPE).stdout\n sys.stdout.buffer.write(o);sys.stdout.buffer.flush()\nexcept Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")",
+  "import sys\ntry:\n import subprocess\n o=subprocess.run([b\"sh\",b\"-c\",(\"printf %s \\\"o\\\"'k' \\\\ $HOME\").encode()],stdout=subprocess.PIPE).stdout\n sys.stdout.buffer.write(o);sys.stdout.buffer.flush()\nexcept Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")",
   :expect "ok",
   :lang :python,
   :lift false}}

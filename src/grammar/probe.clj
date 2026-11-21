@@ -191,7 +191,7 @@
   :ctx/python->sh hands to subprocess. Bytes, so no locale can refuse a
   non-ASCII script."
   [script]
-  (str "[b\"sh\",b\"-c\",(" (lit/py-double script) ").encode(\"utf-8\")]"))
+  (str "[b\"sh\",b\"-c\",(" (lit/py-double script) ").encode()]"))
 
 (defn sh-via-python
   "The python probe for sh probe pr: its script run as
