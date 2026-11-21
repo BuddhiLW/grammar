@@ -69,11 +69,30 @@
       (is (= [:sh.write-file/redirect-octal :sh.lit/double :sh.lit/double] (:realization res)))
       (is (not (.contains ^String (:code res) "'")))
       (is (some #{:ev.full/declared.text.forbid} (:evidence res)))))
-  (testing "a length budget nothing fits is unsatisfiable, with the rejections shown"
+  (testing "a length budget nothing fits is unsatisfiable; every candidate is pruned unexamined"
     (let [prof (p/declare-text full :max-len 20 "test")
           res (g/plan prof :sh wf)]
       (is (= :unsatisfiable (:status res)))
-      (is (= :max-len (-> res :rejected first :violations first :constraint))))))
+      (is (= 0 (:searched res)) "nothing that short exists, so nothing reaches the text check")
+      (is (pos? (:pruned res)) "the skipped work is still reported")))
+  (testing "pruning keeps the program a length budget admits"
+    (let [code (:code (g/plan full :sh wf))
+          tight (g/plan (p/declare-text full :max-len (count (.getBytes ^String code "UTF-8")) "test") :sh wf)]
+      (is (= :ok (:status tight)))
+      (is (= code (:code tight)))
+      (is (= (:realization (g/plan full :sh wf)) (:realization tight))))))
+
+(deftest pruned-counts-only-what-max-len-drops
+  (is (= 0 (:pruned (g/plan full :sh wf))) "no :max-len, nothing pruned")
+  (testing "with both quotes forbidden, the 12 programs that fit 60 bytes
+            are searched and rejected; the longer ones are pruned unbuilt"
+    (let [prof (-> full (p/declare-text :forbid #{"'" "\""} "test") (p/declare-text :max-len 60 "test"))
+          res (g/plan prof :sh wf)]
+      (is (= :unsatisfiable (:status res)))
+      (is (= 12 (:searched res)))
+      (is (every? #(every? #{:forbid} (map :constraint (:violations %))) (:rejected res))
+          "a rejection is never for length: those are pruned before the check")
+      (is (pos? (:pruned res))))))
 
 (deftest every-result-carries-its-justification
   (doseq [prof [full

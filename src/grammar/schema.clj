@@ -125,6 +125,7 @@
    [:rejected {:optional true} [:vector :map]]
    [:explain {:optional true} [:vector :map]]
    [:searched {:optional true} :int]
+   [:pruned {:optional true} :int]
    [:errors {:optional true} :any]])
 
 (defn intent? [x] (m/validate Intent x))

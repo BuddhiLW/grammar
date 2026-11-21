@@ -61,6 +61,24 @@
 (defn- render-env [env visited]
   {:lit (fn [lang text] (candidates env visited lang [:lit text]))})
 
+(declare utf8-len)
+
+(defn- within-len
+  "cands without those whose code is longer than the profile's :max-len,
+  counting each one dropped in the env's :pruned volatile, when it has one.
+
+  Sound by the length law (see grammar.realize): no encoder or wrapper
+  output is shorter than the code it embeds, so every program built from a
+  candidate that is too long is too long as well."
+  [env cands]
+  (if-let [n (get-in env [:profile :text :max-len])]
+    (let [pruned (:pruned env)]
+      (filter (fn [cand]
+                (or (<= (utf8-len (:code cand)) n)
+                    (do (some-> pruned (vswap! inc)) false)))
+              cands))
+    cands))
+
 (defn- direct-entries
   "One bound per admitted realization of intent in lang, costing the
   realization's weight until it is rendered."
@@ -88,20 +106,23 @@
   "Lazy, deterministic seq of candidates for intent in lang, cheapest total
   cost first; ties go to a direct realization, then by cost and id. visited
   holds the languages already on the context stack, so delegation never
-  cycles."
+  cycles. Candidates longer than the profile's :max-len are dropped at
+  every level (see within-len)."
   [env visited lang intent]
-  (c/best-first
-   (concat
-    (direct-entries env visited lang intent)
-    (when-not (= :lit (first intent))
-      (for [w (:wrappers env)
-            :when (and (= lang (:outer w))
-                       (not (visited (:inner w)))
-                       ((:admit env) (:requires w)))]
-        (c/bound (:cost w 0)
-                 [(c/wrapper-rank w)]
-                 #(wrap env visited w
-                        (candidates env (conj visited (:inner w)) (:inner w) intent))))))))
+  (within-len
+   env
+   (c/best-first
+    (concat
+     (direct-entries env visited lang intent)
+     (when-not (= :lit (first intent))
+       (for [w (:wrappers env)
+             :when (and (= lang (:outer w))
+                        (not (visited (:inner w)))
+                        ((:admit env) (:requires w)))]
+         (c/bound (:cost w 0)
+                  [(c/wrapper-rank w)]
+                  #(wrap env visited w
+                         (candidates env (conj visited (:inner w)) (:inner w) intent)))))))))
 
 (defn- stack-candidates
   "Candidates for an explicitly requested context stack, outermost first,
@@ -110,9 +131,9 @@
   (if-let [inner (first more)]
     (let [w (first (filter #(and (= lang (:outer %)) (= inner (:inner %))) (:wrappers env)))]
       (if (and w ((:admit env) (:requires w)))
-        (c/best-first [(c/stream (wrap env #{lang} w (stack-candidates env more intent)))])
+        (within-len env (c/best-first [(c/stream (wrap env #{lang} w (stack-candidates env more intent)))]))
         ()))
-    (c/best-first (direct-entries env #{lang} lang intent))))
+    (within-len env (c/best-first (direct-entries env #{lang} lang intent)))))
 
 ;; ---------------------------------------------------------------- text constraints
 
@@ -138,6 +159,14 @@
                 (recur (next cs) (inc n)
                        (cond-> rejected
                          (< (count rejected) 5) (conj {:via (:via cand) :violations vs}))))))))
+
+(defn- run-pass
+  "search over the candidates gen yields under env, with :pruned, how many
+  candidates the :max-len bound dropped before they were searched."
+  [env gen text budget]
+  (let [pruned (volatile! 0)
+        res (search (gen (assoc env :pruned pruned)) text budget)]
+    (assoc res :pruned @pruned)))
 
 ;; ---------------------------------------------------------------- explanation
 
@@ -174,10 +203,37 @@
 
 ;; ---------------------------------------------------------------- entry point
 
+(defn- not-ok
+  "The Result when the strict pass found nothing: :blocked-on-unknown when
+  the relaxed pass (unknowns let through) finds a program, else
+  :unsatisfiable. strict is the strict pass's search result."
+  [env base gen rows text budget strict]
+  (let [profile (:profile env)
+        text-ev (vec (:evidence text))
+        relaxed (run-pass (assoc env :admit #(p/not-refuted? profile %)) gen text budget)
+        base (assoc base :searched (:searched strict) :explain rows
+                    :pruned (+ (:pruned strict) (:pruned relaxed)))]
+    (if-let [f (:found relaxed)]
+      (assoc base
+             :status :blocked-on-unknown
+             :would-select (:via f)
+             :needs (vec (filter #(= :unknown (p/verdict profile %)) (sort (:requires f))))
+             :evidence (into (p/evidence-for profile (:requires f)) text-ev))
+      (assoc base
+             :status :unsatisfiable
+             :rejected (:rejected strict)
+             :evidence (into (p/evidence-for profile (mapcat #(concat (:no %) (:unknown %)) rows))
+                             text-ev)))))
+
 (defn solve
   "Plan intent in lang under env. opts: :stack (force a context stack,
   outermost first; overrides lang), :budget (max candidates examined).
-  Always returns a grammar.schema/Result."
+  Always returns a grammar.schema/Result.
+
+  :searched, :rejected and :pruned are diagnostics, not contract: how many
+  candidates the strict pass examined, the first ones it rejected, and how
+  many both passes dropped unexamined because their code already exceeded
+  :max-len. Pruning changes them, never the chosen program."
   ([env lang intent] (solve env lang intent {}))
   ([env lang intent {:keys [stack budget] :or {budget 5000}}]
    (let [profile (:profile env)
@@ -186,7 +242,6 @@
        {:status :invalid :intent intent :lang lang :profile (:id profile)
         :errors (s/explain-intent intent) :evidence [] :unknowns []}
        (let [text (:text profile)
-             text-ev (vec (:evidence text))
              gen (fn [e] (if stack
                            (stack-candidates e stack intent)
                            (candidates e #{lang} lang intent)))
@@ -195,7 +250,7 @@
                     (explain env (reachable-langs env lang) intent nil))
              base {:intent intent :lang lang :profile (:id profile)
                    :unknowns (->> rows (mapcat :unknown) distinct sort vec)}
-             {:keys [found searched rejected]} (search (gen env) text budget)]
+             {:keys [found searched pruned] :as strict} (run-pass env gen text budget)]
          (if found
            (assoc base
                   :status :ok
@@ -203,23 +258,9 @@
                   :realization (:via found)
                   :stack (:stack found)
                   :searched searched
+                  :pruned pruned
                   :constraints {:requires (vec (sort (:requires found)))
                                 :text (select-keys text [:max-len :forbid])
                                 :bytes (utf8-len (:code found))}
-                  :evidence (into (p/evidence-for profile (:requires found)) text-ev))
-           (let [opt (search (gen (assoc env :admit #(p/not-refuted? profile %))) text budget)]
-             (if-let [f (:found opt)]
-               (assoc base
-                      :status :blocked-on-unknown
-                      :would-select (:via f)
-                      :needs (vec (filter #(= :unknown (p/verdict profile %)) (sort (:requires f))))
-                      :searched searched
-                      :evidence (into (p/evidence-for profile (:requires f)) text-ev)
-                      :explain rows)
-               (assoc base
-                      :status :unsatisfiable
-                      :searched searched
-                      :rejected rejected
-                      :explain rows
-                      :evidence (into (p/evidence-for profile (mapcat #(concat (:no %) (:unknown %)) rows))
-                                      text-ev))))))))))
+                  :evidence (into (p/evidence-for profile (:requires found)) (vec (:evidence text))))
+           (not-ok env base gen rows text budget strict)))))))
