@@ -36,6 +36,9 @@
   profile is planned against an empty one, so its needs come back
   :unknown, never guessed from the near side."
   [profile {:keys [realizations wrappers admit profiles] :or {admit p/admits?}}]
+  (when-let [dups (seq (keep (fn [[k n]] (when (< 1 n) k)) (frequencies (keep :context wrappers))))]
+    (throw (ex-info "two wrappers declare one :context; each hop needs its own profile (grammar.context/chain keys them by path)"
+                    {:contexts (vec (sort dups))})))
   {:profile profile
    :profiles (or profiles {})
    :admit-fn admit
