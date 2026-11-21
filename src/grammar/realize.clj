@@ -14,7 +14,11 @@
   delegation and for an explicitly requested stack.
 
   :render receives an env whose (:lit env) is (fn [lang s] candidates) and
-  returns a lazy seq of candidates (see grammar.candidate)."
+  returns a lazy seq of candidates (see grammar.candidate), ascending by
+  :cost: best-first takes the first one's cost as a lower bound for the
+  rest. grammar.candidate/leaf and grammar.candidate/combine both return
+  such seqs. A realization's :cost and a wrapper's :cost are numbers >= 0
+  and every :id is a keyword; grammar.solve/make-env refuses anything else."
   (:require [grammar.candidate :as c]
             [grammar.lit :as lit]
             [clojure.string :as str]))
