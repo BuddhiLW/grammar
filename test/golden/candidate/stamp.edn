@@ -1,0 +1,21 @@
+{:keeps-inner-stack
+ {:code "y",
+  :via [:r/x "y"],
+  :requires [:cap/r :cap/y],
+  :stack [:perl],
+  :cost 4,
+  :key [[0 3 :r/x] [0 1 :inner]]},
+ :leaf
+ {:code "x",
+  :via [:r/x],
+  :requires [:cap/r],
+  :stack [:sh],
+  :cost 3,
+  :key [[0 3 :r/x]]},
+ :literal-adds-nothing
+ {:code "x",
+  :via [:r/lit],
+  :requires [],
+  :stack [:sh],
+  :cost 0,
+  :key [[0 2 :r/lit]]}}
