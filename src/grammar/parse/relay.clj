@@ -50,7 +50,8 @@
           \% (if (and (< (inc i) (count f)) (= \% (.charAt f (inc i))))
                (recur (+ i 2) (conj out 37))
                (refuse "printf: directive with no argument" {:format f :at i}))
-          (recur (inc i) (into out (utf8 (str c)))))))))
+          (let [cp (.codePointAt f i)]
+            (recur (+ i (Character/charCount cp)) (into out (utf8 (String. (Character/toChars cp)))))))))))
 
 (declare exec-argv eval-sh)
 
