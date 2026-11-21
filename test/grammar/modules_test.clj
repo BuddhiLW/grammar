@@ -13,7 +13,9 @@
             [grammar.probe :as probe]
             [grammar.profile :as p]
             [grammar.realize :as realize]
-            [grammar.schema :as schema]))
+            [grammar.schema :as schema]
+            [grammar.lang.php :as php]
+            [grammar.lang.perl :as perl]))
 
 (def toy
   "A language that exists only as this map. :toy program text is POSIX sh,
@@ -32,8 +34,10 @@
 (def with-toy (conj core/modules toy))
 
 (deftest default-modules-are-the-built-in-registry
-  (is (= [core/core-module] core/modules))
-  (is (= {:realizations realize/realizations :wrappers realize/wrappers :probes probe/probes}
+  (is (= [:core :php :perl] (mapv :id core/modules)))
+  (is (= {:realizations (into [] cat [realize/realizations php/realizations perl/realizations])
+          :wrappers (into [] cat [realize/wrappers php/wrappers perl/wrappers])
+          :probes (into [] cat [probe/probes php/probes perl/probes])}
          (core/compose core/modules))))
 
 (deftest colliding-modules-are-refused
@@ -83,5 +87,8 @@
 (deftest the-registry-is-read-at-call-time
   (testing "core-module holds vars, so a redefined registry is seen without reloading core"
     (with-redefs [realize/wrappers []]
-      (is (= [] (:wrappers (core/compose core/modules)))))
-    (is (= realize/wrappers (:wrappers (core/compose core/modules))))))
+      (is (= [] (:wrappers (core/compose [core/core-module])))))
+    (is (= realize/wrappers (:wrappers (core/compose [core/core-module])))))
+  (testing "so do the php and perl modules"
+    (with-redefs [php/wrappers [] perl/wrappers []]
+      (is (= realize/wrappers (:wrappers (core/compose core/modules)))))))

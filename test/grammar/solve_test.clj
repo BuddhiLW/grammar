@@ -41,15 +41,25 @@
 
 (deftest refuted-capabilities-are-explained
   (let [prof (declared :locked [:sh/printf :sh/single-quote :sh/pipe :sh/double-quote]
-                       [:sh/redirect :bin/tee :interp/python3 :interp/sh])
+                       [:sh/redirect :bin/tee :interp/python3 :interp/php :interp/perl :interp/sh])
         res (g/plan prof :sh wf)
         rows (into {} (map (juxt :id identity)) (:explain res))]
     (is (= :unsatisfiable (:status res)))
     (is (= [:sh/redirect] (:no (rows :sh.write-file/redirect))))
     (is (= [:bin/tee] (:no (rows :sh.write-file/tee))))
     (is (= [:interp/python3] (:no (rows :ctx/sh->python))))
+    (is (= [:interp/php] (:no (rows :ctx/sh->php))))
+    (is (= [:interp/perl] (:no (rows :ctx/sh->perl))))
     (is (evidence-resolves? prof res))
-    (is (some #{:ev.locked/declared.sh.redirect} (:evidence res)))))
+    (is (some #{:ev.locked/declared.sh.redirect} (:evidence res))))
+  (testing "a profile silent on an interpreter is blocked on it, not refuted"
+    (let [prof (declared :quiet [:sh/printf :sh/single-quote :sh/pipe :sh/double-quote]
+                         [:sh/redirect :bin/tee :interp/python3 :interp/sh])
+          res (g/plan prof :sh wf)]
+      (is (= :blocked-on-unknown (:status res)))
+      (is (every? (set (:unknowns res)) [:interp/php :interp/perl]))
+      (is (= [:interp/perl :pl/binmode :pl/open-write :pl/print] (:needs res))
+          "sh->perl and sh->php tie at cost 11; the tie goes to the lower id"))))
 
 (deftest text-constraints-steer-the-choice
   (testing "forbidding ' pushes content into octal printf, quoted with \""

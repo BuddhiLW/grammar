@@ -41,9 +41,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq busybox dash
+          sudo apt-get install -y -qq busybox dash php-cli perl
           for b in /usr/bin/bash /usr/bin/dash /usr/bin/busybox; do test -x "$b"; done
           python3 --version
+          php --version | head -n1
+          perl -e 'print "perl $^V\n"'
 
       # The pins must resolve from the registries before anything else.
       - name: Resolve declared classpath
