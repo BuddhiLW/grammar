@@ -13,7 +13,11 @@
   (:require [malli.core :as m]
             [malli.error :as me]))
 
-(def Lang [:enum :sh :python])
+(def Lang
+  "A target language: :sh, :python, or any language a module registers
+  (see grammar.core/modules). Open, so a new language is data, not a schema
+  edit."
+  :keyword)
 
 (def Str [:tuple [:= :str] :string])
 
