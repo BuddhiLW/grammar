@@ -50,13 +50,11 @@
                        s)
          "'")))
 
-(defn printf-format
-  "A printf FORMAT operand whose output is exactly the UTF-8 bytes of s, NUL
-  included. The operand is printable ASCII with no shell quote or expansion
-  characters (' \" $ ` become octal), so it survives any quoting context and
-  any forbidden-quote policy. A leading '-' is escaped so no printf can
-  mistake the operand for an option."
-  [^String s]
+(defn printf-format-bytes
+  "A printf FORMAT operand whose output is exactly the bytes bs (a byte
+  array or a seq of byte values), NUL and invalid UTF-8 included. See
+  printf-format."
+  [bs]
   (apply str
          (map-indexed
           (fn [i b]
@@ -67,7 +65,16 @@
                     (#{34 36 39 96} u) (format "\\%03o" u)
                     (<= 32 u 126) (str (char u))
                     :else (format "\\%03o" u))))
-          (.getBytes s "UTF-8"))))
+          bs)))
+
+(defn printf-format
+  "A printf FORMAT operand whose output is exactly the UTF-8 bytes of s, NUL
+  included. The operand is printable ASCII with no shell quote or expansion
+  characters (' \" $ ` become octal), so it survives any quoting context and
+  any forbidden-quote policy. A leading '-' is escaped so no printf can
+  mistake the operand for an option."
+  [^String s]
+  (printf-format-bytes (.getBytes s "UTF-8")))
 
 ;; ---------------------------------------------------------------- python
 
