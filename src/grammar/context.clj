@@ -157,8 +157,11 @@
   "Probes of the far side of a hop, run IN the stacked runtime.
     :sh/posix-words  the shell that parsed this program splits and
                      unquotes words like POSIX sh: through a direct ssh
-                     hop that is the remote LOGIN shell."
-  [{:cap :sh/posix-words :needs [:sh/printf]
+                     hop that is the remote LOGIN shell. It needs
+                     nothing: fish aborts the whole framed text on one
+                     quote it reads differently, refuting :sh/printf
+                     too, and must still be refuted here, not skipped."
+  [{:cap :sh/posix-words :needs []
     :script (str "printf %s " (lit/sh-single posix-words-text) "\\ \\\\")
     :expect (str posix-words-text " \\")}])
 
