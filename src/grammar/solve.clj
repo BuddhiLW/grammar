@@ -28,10 +28,29 @@
   [r intent]
   (into (set (:requires r)) (when-let [f (:requires-of r)] (f intent))))
 
+(defn- bad-entries
+  "The realizations or wrappers in xs whose :id is not a keyword or whose
+  :cost, when given, is not a number >= 0, each as {:id :cost}."
+  [xs]
+  (vec (for [x xs
+             :let [cost (:cost x 0)]
+             :when (not (and (keyword? (:id x)) (number? cost) (not (neg? cost))))]
+         (select-keys x [:id :cost]))))
+
 (defn make-env
   "Planning environment over profile. admit is (fn [profile requires] bool),
-  default grammar.profile/admits? (all :yes)."
+  default grammar.profile/admits? (all :yes).
+
+  Refuses, as ex-info, a realization or wrapper whose :id is not a keyword
+  (ids rank equal costs, and mixed id types do not compare) or whose :cost
+  is not a number >= 0 (a cost is a lower bound for everything under it,
+  which a negative cost would break)."
   [profile {:keys [realizations wrappers admit] :or {admit p/admits?}}]
+  (let [bad (into {} (keep (fn [[k xs]] (when-let [b (seq (bad-entries xs))] [k (vec b)])))
+                  {:realizations realizations :wrappers wrappers})]
+    (when (seq bad)
+      (throw (ex-info "every realization and wrapper needs a keyword :id and a :cost that is a number >= 0"
+                      {:invalid bad}))))
   {:profile profile
    :by-key (update-vals (group-by (juxt :intent :lang) realizations) #(vec (sort-by order %)))
    :wrappers (vec (sort-by order wrappers))
@@ -49,30 +68,21 @@
   (for [r (get-in env [:by-key [op lang]])
         :let [r (assoc r :requires (requires-of r intent))]
         :when ((:admit env) (:requires r))]
-    {:cost (c/weight r)
-     :key [[0 (:cost r 0) (:id r)]]
-     :open #(map (fn [cand] (c/stamp cand r lang))
-                 ((:render r) (render-env env visited) intent))}))
+    (c/bound (c/weight r)
+             [(c/realization-rank r)]
+             #(map (fn [cand] (c/stamp cand r lang))
+                   ((:render r) (render-env env visited) intent)))))
 
 (defn- wrap
   "Ascending bounds, one per inner candidate (ascending itself), each
   opening the candidates of wrapper w around it."
   [env visited w inner-cands]
-  (let [rank [1 (:cost w 0) (:id w)]]
-    (map (fn [ic]
-           (let [cost (+ (:cost w 0) (:cost ic))
-                 key (into [rank] (:key ic))]
-             {:cost cost
-              :key key
-              :open #(map (fn [oc]
-                            {:code (:code oc)
-                             :via (into [(:id w)] (concat (:via ic) (:via oc)))
-                             :requires (into (set (:requires w)) (concat (:requires ic) (:requires oc)))
-                             :stack (into [(:outer w)] (:stack ic))
-                             :cost (+ cost (:cost oc))
-                             :key (into key (:key oc))})
-                          ((:render w) (render-env env visited) (:code ic)))}))
-         inner-cands)))
+  (map (fn [ic]
+         (c/bound (+ (:cost w 0) (:cost ic))
+                  (into [(c/wrapper-rank w)] (:key ic))
+                  #(map (fn [oc] (c/enclose w ic oc))
+                        ((:render w) (render-env env visited) (:code ic)))))
+       inner-cands))
 
 (defn candidates
   "Lazy, deterministic seq of candidates for intent in lang, cheapest total
@@ -88,10 +98,10 @@
             :when (and (= lang (:outer w))
                        (not (visited (:inner w)))
                        ((:admit env) (:requires w)))]
-        {:cost (:cost w 0)
-         :key [[1 (:cost w 0) (:id w)]]
-         :open #(wrap env visited w
-                      (candidates env (conj visited (:inner w)) (:inner w) intent))})))))
+        (c/bound (:cost w 0)
+                 [(c/wrapper-rank w)]
+                 #(wrap env visited w
+                        (candidates env (conj visited (:inner w)) (:inner w) intent))))))))
 
 (defn- stack-candidates
   "Candidates for an explicitly requested context stack, outermost first,
@@ -100,7 +110,7 @@
   (if-let [inner (first more)]
     (let [w (first (filter #(and (= lang (:outer %)) (= inner (:inner %))) (:wrappers env)))]
       (if (and w ((:admit env) (:requires w)))
-        (c/best-first [{:cost 0 :key [] :stream (wrap env #{lang} w (stack-candidates env more intent))}])
+        (c/best-first [(c/stream (wrap env #{lang} w (stack-candidates env more intent)))])
         ()))
     (c/best-first (direct-entries env #{lang} lang intent))))
 
