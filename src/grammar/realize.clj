@@ -48,6 +48,20 @@
   [url]
   (str/starts-with? url "http://"))
 
+(defn py-bytes
+  "python expression for the UTF-8 bytes of python str expression e. An
+  argv word handed to subprocess as bytes is never encoded with the
+  locale, so a non-ASCII word survives LC_ALL=C with PYTHONUTF8=0."
+  [e]
+  (str "(" e ").encode(\"utf-8\")"))
+
+(defn- py-path
+  "python expression for a pathlib.Path naming the UTF-8 bytes of python str
+  expression e, decoded with os.fsdecode: under an ASCII locale the
+  non-ASCII bytes ride as surrogate escapes and reach the OS unchanged."
+  [e]
+  (str "pathlib.Path(os.fsdecode(" (py-bytes e) "))"))
+
 (def realizations
   [;; ------------------------------------------------ literals: sh
    {:id :sh.lit/single :intent :lit :lang :sh :cost 1
@@ -103,7 +117,7 @@
     :requires #{:py/pathlib :py/open-write}
     :doc "write_bytes opens path in write mode: a runtime whose audit hook refuses that refutes :py/open-write."
     :render (fn [env [_ {:keys [path content]}]]
-              (c/combine (fn [p c] (str "import pathlib;pathlib.Path(" p ").write_bytes(" c ".encode())"))
+              (c/combine (fn [p c] (str "import os,pathlib;" (py-path p) ".write_bytes(" (py-bytes c) ")"))
                          (lit-in env :python path) (lit-in env :python content)))}
 
    ;; ------------------------------------------------ :run  (exec argv, every word literal)
@@ -113,9 +127,10 @@
     :render (fn [env [_ {:keys [argv]}]] (sh-words env argv))}
    {:id :py.run/subprocess :intent :run :lang :python :cost 1
     :requires #{:py/subprocess} :requires-of #(hash-set (bin-cap (program %)))
+    :doc "Each argv word is passed as UTF-8 bytes, so no locale (LC_ALL=C, PYTHONUTF8=0) can make subprocess refuse a non-ASCII word."
     :render (fn [env [_ {:keys [argv]}]]
               (apply c/combine
-                     (fn [& ws] (str "import subprocess,sys;sys.exit(subprocess.call([" (str/join "," ws) "]))"))
+                     (fn [& ws] (str "import subprocess,sys;sys.exit(subprocess.call([" (str/join "," (map py-bytes ws)) "]))"))
                      (map #(lit-in env :python %) argv)))}
 
    ;; ------------------------------------------------ :ensure-dir  (path is a directory, parents too)
@@ -125,7 +140,7 @@
    {:id :py.ensure-dir/pathlib :intent :ensure-dir :lang :python :cost 1
     :requires #{:py/pathlib :py.os/mkdir}
     :render (fn [env [_ {:keys [path]}]]
-              (c/combine #(str "import pathlib;pathlib.Path(" % ").mkdir(parents=True,exist_ok=True)")
+              (c/combine #(str "import os,pathlib;" (py-path %) ".mkdir(parents=True,exist_ok=True)")
                          (lit-in env :python path)))}
 
    ;; ------------------------------------------------ :remove-file  (path no longer exists as a file)
@@ -135,7 +150,7 @@
    {:id :py.remove-file/pathlib :intent :remove-file :lang :python :cost 1
     :requires #{:py/pathlib :py.os/unlink}
     :render (fn [env [_ {:keys [path]}]]
-              (c/combine #(str "import pathlib;pathlib.Path(" % ").unlink(missing_ok=True)")
+              (c/combine #(str "import os,pathlib;" (py-path %) ".unlink(missing_ok=True)")
                          (lit-in env :python path)))}
 
    ;; ------------------------------------------------ :http-get  (response body on stdout, byte for byte)
@@ -191,5 +206,5 @@
    {:id :ctx/python->sh :outer :python :inner :sh :cost 10
     :requires #{:py/subprocess :interp/sh}
     :render (fn [env code]
-              (c/combine (fn [a b c] (str "import subprocess,sys;sys.exit(subprocess.call([" a "," b "," c "]))"))
+              (c/combine (fn [a b c] (str "import subprocess,sys;sys.exit(subprocess.call([" (str/join "," (map py-bytes [a b c])) "]))"))
                          (lit-in env :python "sh") (lit-in env :python "-c") (lit-in env :python code)))}])

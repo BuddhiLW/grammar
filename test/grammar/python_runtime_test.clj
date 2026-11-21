@@ -16,7 +16,9 @@
             [grammar.schema :as s]
             [grammar.lit :as lit]
             [clojure.test.check.generators :as gen]
-            [hive-test.trifecta :refer [deftrifecta]])
+            [hive-test.trifecta :refer [deftrifecta]]
+            [clojure.test.check.properties :as prop]
+            [clojure.test.check.clojure-test :refer [defspec]])
   (:import [java.io File]))
 
 (defn- site-dir!
@@ -186,7 +188,10 @@
     (testing "full: the lifted sh verdicts are dash's, judged by the sh probes' own expect"
       (is (= :yes (p/verdict py-full :sh/printf)))
       (is (= :no (p/verdict py-full :sh/ansi-c-quote)) "dash has no $'...'")
-      (is (= :no (p/verdict py-full :interp/python3)) "PATH holds only sh"))
+      (is (not (contains? (:caps py-full) :interp/python3))
+          "the python3 an inner sh finds is another interpreter: not lifted")
+      (is (not-any? #(= "bin" (namespace %)) (keys (:caps py-full)))
+          ":bin/ caps are answered on demand by shutil.which, never by a shell"))
     (testing "the lifted sh probes are skipped where subprocess or sh is refuted"
       (doseq [[prof id why] [[py-nosub :py-nosub ":py/subprocess=no"] [py-nosh :py-nosh ":interp/sh=no"]]
               cap py-sh-caps]
@@ -219,7 +224,7 @@
   (testing "every lifted sh probe runs the sh script verbatim through subprocess, same expect"
     (let [sh-ps (into {} (map (juxt :cap identity)) probe/probes)]
       (doseq [{:keys [cap script expect needs]} probe/py-sh-probes]
-        (is (str/includes? script (str "[\"sh\",\"-c\"," (lit/py-double (:script (sh-ps cap))) "]")) (str cap))
+        (is (str/includes? script (probe/py-sh-argv (:script (sh-ps cap)))) (str cap))
         (is (= (:expect (sh-ps cap)) expect) (str cap))
         (is (every? (set needs) (concat [:py/subprocess :interp/sh] (:needs (sh-ps cap)))) (str cap)))))
   (testing "every python probe but :interp/sh is lifted into an sh probe running python3 -c"
@@ -248,12 +253,54 @@
            (and (= :python lang) (false? lift) (= "ok" expect)
                 (= [:py/sys :py/stdout-buffer :py/subprocess :interp/sh] (take 4 needs))
                 (= (count needs) (count (distinct needs)))
-                (str/includes? script "[\"sh\",\"-c\",")))
+                (str/includes? script "[b\"sh\",b\"-c\",")))
    :mutations [["keeps-sh-lang" (fn [pr] (dissoc (orig-sh-via-python pr) :lang))]
                ["liftable" (fn [pr] (dissoc (orig-sh-via-python pr) :lift))]
                ["drops-inner-needs" (fn [pr] (assoc (orig-sh-via-python pr) :needs [:py/sys :py/stdout-buffer :py/subprocess :interp/sh]))]
                ["no-interp-sh" (fn [pr] (update (orig-sh-via-python pr) :needs #(vec (remove #{:interp/sh} %))))]
                ["unquoted" (fn [pr] (update (orig-sh-via-python pr) :script str/replace "\\\"" "\""))]]})
+
+(defn- busybox-sh-rt!
+  "python runtime whose PATH holds only sh, a link to busybox: tee and
+  printf are applets the shell runs, not files exec finds."
+  []
+  (let [d (fx/tmp-dir! "grammar-bbsh-")]
+    (java.nio.file.Files/createSymbolicLink (.toPath (File. ^String d "sh")) (.toPath (File. ^String (fx/tools :busybox)))
+                                            (make-array java.nio.file.attribute.FileAttribute 0))
+    (rt/process-runtime {:id :py-bbsh :lang :python :argv [(fx/tools :python3) "-c"]
+                         :env {"PATH" d "LC_ALL" "C.UTF-8"}})))
+
+(deftest bin-caps-follow-exec-not-the-shell
+  (let [r (busybox-sh-rt!)
+        prof (g/discover! r)
+        {res :result after :profile} (g/plan-resolving! r prof [:run {:argv ["tee" "/dev/null"]}])]
+    (is (= :yes (p/verdict prof :sh/pipe)) "busybox sh runs its tee applet in a pipe")
+    (is (= :unknown (p/verdict prof :bin/tee)) "but no shell probe answers for exec")
+    (is (= :no (p/verdict after :bin/tee)) "shutil.which finds no tee file on PATH")
+    (is (not= :ok (:status res)) "so :run of tee is never planned")))
+
+(def ^:private ascii-env {"LC_ALL" "C" "PYTHONUTF8" "0" "PYTHONCOERCECLOCALE" "0"})
+
+(deftest non-ascii-argv-under-an-ascii-locale
+  (let [r (rt/process-runtime {:id :py-ascii :lang :python :argv [(fx/tools :python3) "-c"]
+                               :env (assoc ascii-env "PATH" (fx/bin-dir! [:sh]))})
+        prof (g/resolve! r (g/discover! r) [:bin/sh])
+        dir (fx/tmp-dir! "grammar-ascii-")]
+    (is (= "ascii" (:out (rt/execute r "import sys;sys.stdout.write(sys.getfilesystemencoding())"))))
+    (doseq [[intent opts] [[[:str "caf\u00e9 \u03bb"] {:stack [:python :sh]}]
+                           [[:run {:argv ["sh" "-c" "test \"$1\" = caf\u00e9" "x" "caf\u00e9"]}] {}]
+                           [[:write-file {:path (str dir "/caf\u00e9") :content "\u00e9"}] {}]
+                           [[:ensure-dir {:path (str dir "/d\u00e9")}] {}]
+                           [[:remove-file {:path (str dir "/caf\u00e9")}] {}]]]
+      (let [res (g/realize! r prof intent opts)]
+        (is (= :ok (:status res)) (pr-str intent))
+        (is (true? (:ok? (:verified res))) (pr-str intent (:execution res)))))))
+
+(defspec py-sh-argv-evaluates-to-the-script 100
+  (prop/for-all [s (gen/such-that #(not (str/includes? % "\u0000")) gen/string 50)]
+    (let [run (rt/execute (:py-full @rts)
+                          (str "import sys;sys.stdout.buffer.write(b'\\0'.join(" (probe/py-sh-argv s) "))"))]
+      (java.util.Arrays/equals (.getBytes (str "sh\u0000-c\u0000" s) "UTF-8") ^bytes (:out-bytes run)))))
 
 (deftest unprobed-languages-are-refused
   (doseq [lang [:php :perl]]

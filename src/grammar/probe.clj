@@ -175,6 +175,13 @@
              :doc "The wget the shell resolves is GNU Wget, which verifies TLS certificates. busybox wget rejects --version, so it prints no; so does a shell with no wget."
              :script "case $(wget --version) in 'GNU Wget'*) printf %s ok;; *) printf %s no;; esac" :expect "ok"})))
 
+(defn py-sh-argv
+  "python expression for the argv [sh -c script] as UTF-8 bytes, the argv
+  :ctx/python->sh hands to subprocess. Bytes, so no locale can refuse a
+  non-ASCII script."
+  [script]
+  (str "[b\"sh\",b\"-c\",(" (lit/py-double script) ").encode(\"utf-8\")]"))
+
 (defn sh-via-python
   "The python probe for sh probe pr: its script run as
   subprocess.run([\"sh\",\"-c\",script]), the argv :ctx/python->sh runs,
@@ -190,21 +197,34 @@
          :needs (into [:py/sys :py/stdout-buffer :py/subprocess :interp/sh]
                       (remove #{:py/sys :py/stdout-buffer :py/subprocess :interp/sh}) needs)
          :script (guarded "subprocess"
-                          (str "o=subprocess.run([\"sh\",\"-c\"," (lit/py-double script)
-                               "],stdout=subprocess.PIPE).stdout")
+                          (str "o=subprocess.run(" (py-sh-argv script) ",stdout=subprocess.PIPE).stdout")
                           "sys.stdout.buffer.write(o);sys.stdout.buffer.flush()")))
+
+(defn- sh-law?
+  "True for an sh probe whose law is about the sh python reaches, so that
+  a python runtime can prove it through subprocess. Not lifted:
+  - a cap with a python probe of its own (the :py/ laws, :interp/sh);
+  - :bin/<prog>: its contract is that exec finds prog on PATH, which a
+    shell running prog does not show (a busybox applet is no file), so a
+    python runtime answers it with its own on-demand shutil.which probe;
+  - :interp/python3: the python3 an inner sh finds is another interpreter
+    than the runtime's, and a profile keeps one verdict per cap."
+  [native {:keys [cap]}]
+  (not (or (native cap)
+           (= "bin" (namespace cap))
+           (= :interp/python3 cap))))
 
 (def py-sh-probes
   "The sh probes a python runtime runs through subprocess: every sh probe
-  whose cap has no python probe of its own (so not the lifted :py/ laws,
-  nor :interp/sh), lifted by sh-via-python, in sh order. They follow
-  py-probes, which proves the :py/ caps they need.
+  whose law is about the sh it reaches (see sh-law?), lifted by
+  sh-via-python, in sh order. They follow py-probes, which proves the :py/
+  caps they need.
 
   This is the probe-side half of a python->sh context layer: a general
   stacked runtime that probes an inner language through a wrapper would
   produce these by running the sh probes through :ctx/python->sh."
   (let [native (into #{} (map :cap) py-probes)]
-    (into [] (comp (remove (comp native :cap)) (map sh-via-python)) probes)))
+    (into [] (comp (filter (partial sh-law? native)) (map sh-via-python)) probes)))
 
 (defn judge
   "Verdict of one probe run. A run that never happened proves nothing."
