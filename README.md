@@ -176,6 +176,61 @@ clojure -M:test
 Runs against real `bash`, `bash -r`, `dash`, `busybox sh` and `python3`, with
 PATH cut down per runtime to a scratch bin dir.
 
+Gated real relay labs (offline by default):
+
+```sh
+docker build -t grammar-relay-lab:1 test/lab/sshd
+GRAMMAR_SSHD=1 clojure -M:test -n grammar.ssh-relay-test
+
+# three VirtualBox VMs; the key is the one passed to vagrant up
+(cd test/lab/vagrant && LAB_PUBKEY="$(cat k.pub)" LAB_PRIVKEY="$(base64 -w0 k)" vagrant up)
+GRAMMAR_VAGRANT=1 GRAMMAR_VAGRANT_KEY=$PWD/k clojure -M:test -n grammar.vagrant-relay-test
+(cd test/lab/vagrant && vagrant destroy -f)
+```
+
+## Relay hops
+
+A hop (`grammar.context`) runs the inner program somewhere else: `env -i`,
+`sudo -n -- sh -c`, `ssh -- DEST W`, `ssh -J J1,J2 -- DEST W`, or
+`printf FMT | ssh -- DEST sh`. Each re-parses the text its own way:
+
+| hop   | parses of the inner program                                  |
+|-------|--------------------------------------------------------------|
+| env, sudo | outer sh (one quoted word), then `sh -c`; env/sudo exec argv |
+| ssh   | outer sh, then ssh JOINS its argv with spaces and the remote LOGIN shell parses the result |
+| -J    | as ssh: the jump hosts forward TCP and never parse           |
+| stdin | outer sh parses an octal-ASCII printf FORMAT; the login shell parses only the word `sh`; sh reads the program from stdin |
+
+`grammar.context/chain` links hops and gives each one a `:context` key
+naming its whole path from the root (`:hop/sh->ssh.n1>sh->sudo.root`), so
+a direct and a stdin hop to one host, or sudo behind two different hosts,
+never share a profile; `make-env` refuses two wrappers with one context.
+Inside a hop the solver plans against `(get profiles context)`, the
+profile `discover-chain!` probed THROUGH the hop (a `StackedRuntime`),
+and applies that profile's `:max-len` / `:forbid` to the inner program.
+A context with no profile answers `:unknown`. `:target` names where the
+leaf must run.
+
+A stacked runtime frames the far program between two markers, the close
+one carrying its exit status. A run with no frame (ssh exit 255, `sudo -n`
+refusing) is an `:error`, so a probe says `:unknown`, never `:no`; output
+before the frame (motd, rc files) comes back as `:noise`.
+
+The direct ssh hops need `:sh/posix-words` of their far side. Its probe
+text holds a newline, `!`, a double backslash and a backslash before a
+quote, so a csh or fish login refutes it; the stdin hop reaches those
+shells anyway. Single-quoted text grows about 4x per hop where it holds
+quotes; the planner does not yet weigh the 128 KB per-argument limit.
+
+`grammar.parse.sh` / `grammar.parse.relay` are a pure oracle of these
+parsers (POSIX sh, bash, fish, csh word splitting and quote removal, ssh's
+join, sudo/env exec, python -c). Property tests check that N encodings
+through it are identity for arbitrary bytes; that raw payload bytes
+through chains with direct fish/csh hops are delivered exactly or the
+probe refutes every such hop; and that the oracle agrees with real dash,
+busybox ash and bash (and, with GRAMMAR_SSHD=1, fish and tcsh in the lab
+image) wherever it accepts a text, with an asserted acceptance rate.
+
 ## Release
 
 Built and published with [hive-build](https://clojars.org/io.github.hive-agi/hive-build)

@@ -28,7 +28,10 @@
    :rm (which "rm")
    :curl (which "curl")
    :wget (which "wget")
-   :busybox "/usr/bin/busybox"})
+   :busybox "/usr/bin/busybox"
+   :env (which "env")
+   :ssh (which "ssh")
+   :sudo (which "sudo")})
 
 (defn tmp-dir! [prefix]
   (str (Files/createTempDirectory prefix (make-array FileAttribute 0))))

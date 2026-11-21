@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 buddhilw
+#
+# Three-VM relay lab for grammar's GRAMMAR_VAGRANT=1 tests:
+#
+#   host --ssh--> vm1 (debian, user relay, login sh, passwordless sudo)
+#             --ssh--> vm2 (alpine, relay: login sh; cshu: login tcsh)
+#                   --ssh--> vm3 (debian, relay: login sh; fishu: login fish)
+#
+# vm2 and vm3 accept the lab key only; the host reaches them through vm1
+# (ProxyJump) or by a nested ssh run inside vm1. The lab key pair is made
+# by the test in a temp dir and passed in as LAB_PUBKEY / LAB_PRIVKEY; it
+# is copied to every relay user so nested hops can authenticate.
+#
+#   LAB_PUBKEY=... LAB_PRIVKEY=... vagrant up
+#   vagrant destroy -f
+#
+# 1 GB and 1 CPU per VM; linked clones keep disk small.
+
+pub = ENV.fetch("LAB_PUBKEY", "")
+priv = ENV.fetch("LAB_PRIVKEY", "")
+
+USERS = <<~SH
+  set -eu
+  mk() { u=$1; sh_=$2
+    id "$u" >/dev/null 2>&1 || { if command -v adduser >/dev/null && [ -f /etc/alpine-release ]; then adduser -D -s "$sh_" "$u"; else useradd -m -s "$sh_" "$u"; fi; }
+    passwd -u "$u" >/dev/null 2>&1 || usermod -p '*' "$u" 2>/dev/null || true
+    d=/home/$u/.ssh; mkdir -p $d
+    printf '%s\\n' "$PUB" > $d/authorized_keys
+    printf '%s\\n' "$PRIV" | base64 -d > $d/id_ed25519
+    printf '%s\\n' 'Host *' '  StrictHostKeyChecking accept-new' '  LogLevel ERROR' '  BatchMode yes' > $d/config
+    chown -R "$u" $d; chmod 700 $d; chmod 600 $d/*
+  }
+SH
+
+NODES = {
+  "vm1" => { box: "debian/bookworm64", ip: "192.168.56.211",
+             pkgs: "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo python3 >/dev/null",
+             users: "mk relay /bin/sh" },
+  "vm2" => { box: "generic/alpine319", ip: "192.168.56.212",
+             pkgs: "apk add --no-cache sudo python3 tcsh >/dev/null",
+             users: "mk relay /bin/sh; mk cshu /bin/tcsh" },
+  "vm3" => { box: "debian/bookworm64", ip: "192.168.56.213",
+             pkgs: "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo python3 fish >/dev/null",
+             users: "mk relay /bin/sh; mk fishu /usr/bin/fish" },
+}
+
+Vagrant.configure("2") do |config|
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  # Keep the box's well-known insecure key: a vagrant crash halfway
+  # through swapping it once left vm1 refusing every key. The lab is
+  # private, short-lived and destroyed after each run; the relay users
+  # accept only the per-run lab key.
+  config.ssh.insert_key = false
+  NODES.each do |name, n|
+    config.vm.define name do |c|
+      c.vm.box = n[:box]
+      c.vm.hostname = name
+      c.vm.network "private_network", ip: n[:ip]
+      c.vm.provider "virtualbox" do |vb|
+        vb.name = "grammar-relay-#{name}"
+        vb.memory = 1024
+        vb.cpus = 1
+        vb.linked_clone = true
+      end
+      hosts = NODES.map { |h, m| "#{m[:ip]} #{h}" }.join(" ")
+      c.vm.provision "shell", env: { "PUB" => pub, "PRIV" => priv }, inline: <<~SH
+        set -eu
+        #{n[:pkgs]}
+        set -- #{hosts}; while [ $# -ge 2 ]; do grep -q " $2$" /etc/hosts || echo "$1 $2" >> /etc/hosts; shift 2; done
+        #{USERS}
+        #{n[:users]}
+        mkdir -p /etc/sudoers.d
+        echo 'relay ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/relay
+        chmod 440 /etc/sudoers.d/relay
+        id app >/dev/null 2>&1 || { if [ -f /etc/alpine-release ]; then adduser -D app; else useradd -m app; fi; }
+      SH
+    end
+  end
+end

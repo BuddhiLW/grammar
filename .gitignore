@@ -3,3 +3,6 @@
 .lsp/
 .clj-kondo/
 target/
+test/lab/vagrant/.vagrant/
+test/lab/vagrant/k
+test/lab/vagrant/k.pub
