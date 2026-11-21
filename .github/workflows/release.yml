@@ -116,21 +116,34 @@ jobs:
       # This is a curl HEAD, not `clojure -T:build verify-published`: in
       # hive-build 0.3.1 that task's probe calls .openConnection on a
       # java.net.URI, which throws, so it reports every registry as
-      # unreachable. Retries cover the CDN catching up after the upload.
+      # unreachable. Retries cover the CDN catching up after the upload. The
+      # query string makes each attempt miss the CDN cache, which keeps 404s:
+      # a HEAD made before the upload must not answer for the one after it.
       - name: Verify published
         run: |
           set -euo pipefail
           VER=$(tr -d '[:space:]' < VERSION)
           base="https://repo.clojars.org/io/github/buddhilw/grammar/$VER/grammar-$VER"
+          tries=8
           for ext in pom jar; do
             code=000
-            for attempt in 1 2 3 4 5 6 7 8; do
-              code=$(curl -sS -o /dev/null -I --max-time 20 -w '%{http_code}' "$base.$ext" || true)
+            for attempt in $(seq 1 "$tries"); do
+              code=$(curl -sS -o /dev/null -I --max-time 20 -w '%{http_code}' \
+                "$base.$ext?verify=${GITHUB_RUN_ID:-local}-$attempt" || true)
               [ "$code" = 200 ] && break
-              echo "grammar-$VER.$ext: HTTP $code (attempt $attempt), retrying"
-              sleep 15
+              if [ "$attempt" -lt "$tries" ]; then
+                echo "grammar-$VER.$ext: HTTP $code (attempt $attempt of $tries), retrying"
+                sleep 15
+              fi
             done
-            [ "$code" = 200 ] || { echo "grammar-$VER.$ext is not on Clojars (HTTP $code)" >&2; exit 1; }
+            if [ "$code" != 200 ]; then
+              if [ "$code" = 000 ]; then
+                echo "grammar-$VER.$ext: repo.clojars.org unreachable after $tries attempts" >&2
+              else
+                echo "grammar-$VER.$ext is not on Clojars (HTTP $code after $tries attempts)" >&2
+              fi
+              exit 1
+            fi
             echo "grammar-$VER.$ext: HTTP 200"
           done
 
