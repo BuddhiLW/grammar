@@ -274,15 +274,40 @@
   (let [r (busybox-sh-rt!)
         prof (g/discover! r)
         res (g/realize! r prof [:run {:argv ["tee" "/dev/null"]}] {:resolve true})
-        after (:profile-after res)]
-    (is (= :yes (p/verdict prof :sh/pipe)) "busybox sh runs its tee applet in a pipe")
-    (is (= :unknown (p/verdict prof :bin/tee)) "but no shell probe answers for exec")
+        after (:profile-after res)
+        applets? (= :yes (p/verdict after :sh.cmd/tee))]
+    (is (= :yes (p/verdict prof :sh/pipe)) "the inner busybox sh pipes between builtins")
+    (is (= :unknown (p/verdict prof :bin/tee)) "no shell probe is lifted to answer for exec")
     (is (= :no (p/verdict after :bin/tee)) "shutil.which finds no tee file on PATH")
-    (is (= :yes (p/verdict after :sh.cmd/tee)) "the inner sh resolves the tee applet")
-    (testing "so :py.run/subprocess is never planned: :run reroutes through sh, and runs"
-      (is (= :ok (:status res)))
-      (is (= [:ctx/python->sh :sh.run/words] (take 2 (:realization res))))
-      (is (true? (:ok? (:verified res))) (pr-str (:execution res))))))
+    ;; busybox-static's sh runs its applets with a PATH holding none of
+    ;; them; a dynamically linked busybox does not (see fs_ops_test). Follow
+    ;; the observed :sh.cmd/tee verdict.
+    (if applets?
+      (testing "so :py.run/subprocess is never planned: :run reroutes through sh, and runs"
+        (is (= :ok (:status res)))
+        (is (= [:ctx/python->sh :sh.run/words] (take 2 (:realization res))))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res))))
+      (testing "no tee anywhere: :run of tee is refused, nothing runs"
+        (is (not= :ok (:status res)))
+        (is (nil? (:execution res)))))))
+
+(deftest quote-forbidding-policies-still-plan-python
+  (let [r (:py-full @rts)
+        prof (g/resolve! r (:py-full @profs) [:bin/sh])
+        dir (fx/tmp-dir! "grammar-noquote-")]
+    (doseq [forbid [#{"\""} #{"'" "\""}]
+            :let [pol (p/declare-text prof :forbid forbid "test: no quotes")]
+            [intent opts] [[[:write-file {:path (str dir "/w caf\u00e9") :content "it's \"x\""}] {}]
+                           [[:ensure-dir {:path (str dir "/d\u00e9")}] {}]
+                           [[:remove-file {:path (str dir "/w caf\u00e9")}] {}]
+                           [[:run {:argv ["sh" "-c" "test \"$1\" = 'a b'" "x" "a b"]}] {}]
+                           [[:str "caf\u00e9 'q' \"d\""] {}]
+                           [[:str "caf\u00e9 'q' \"d\""] {:stack [:python :sh]}]]]
+      (testing (pr-str forbid intent opts)
+        (let [res (g/realize! r pol intent opts)]
+          (is (= :ok (:status res)) (pr-str (:rejected res)))
+          (is (not-any? #(str/includes? (str (:code res)) %) forbid))
+          (is (true? (:ok? (:verified res))) (pr-str (:execution res))))))))
 
 (deftest fs-probes-clean-up-and-ignore-proxies
   (let [tmp (fx/tmp-dir! "grammar-probe-tmp-")
