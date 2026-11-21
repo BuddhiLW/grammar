@@ -101,6 +101,18 @@
     (is (thrown? clojure.lang.ExceptionInfo
                  (solve/make-env (prof :root #{} #{}) {:wrappers [(cx/sudo-hop {}) (cx/sudo-hop {})]})))))
 
+(deftest far-side-text-constraints-bind-the-inner-program
+  (testing ":forbid on vm2 applies to what runs on vm2, not only to the outer text"
+    (let [res (solve/solve (env (update far v2 p/declare-text :forbid #{"'"} "test: vm2 bans single quotes"))
+                           :sh [:str "it's"] {:target v2})
+          inner (-> (r/run world :sh (:code res)) :trace last :input)]
+      (is (= :ok (:status res)))
+      (is (not (clojure.string/includes? inner "'")) inner)
+      (is (= "it's" (r/out-string (r/run world :sh (:code res)))))))
+  (testing ":max-len on vm2 no inner program can meet is unsatisfiable"
+    (is (= :unsatisfiable (:status (solve/solve (env (update far v2 p/declare-text :max-len 4 "test"))
+                                                :sh [:str "x"] {:target v2}))))))
+
 (defspec planned-relays-emit-the-payload-in-the-oracle 150
   (prop/for-all [s rm/gen-bytes
                  target (gen/elements [nil v1 v2 root!])]

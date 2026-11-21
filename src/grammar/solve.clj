@@ -56,7 +56,7 @@
       (assoc env :profile prof :admit (fn [reqs] (admit prof reqs))))
     env))
 
-(declare candidates)
+(declare candidates violations)
 
 (defn- render-env [env visited]
   {:lit (fn [lang text] (candidates env visited lang [:lit text]))})
@@ -143,8 +143,15 @@
                        ((:admit (at-context env w)) (:inner-requires w)))]
         {:cost (:cost w 0)
          :key [[1 (:cost w 0) (:id w)]]
-         :open #(let [[env' visited'] (crossing env visited w)]
-                  (wrap env visited w (candidates env' visited' (:inner w) intent)))})))))
+         :open #(let [[env' visited'] (crossing env visited w)
+                      inner (candidates env' visited' (:inner w) intent)
+                      far-text (when (:context w) (:text (:profile env')))]
+                  (wrap env visited w
+                        (if (or (:max-len far-text) (seq (:forbid far-text)))
+                          ;; the far side's own text constraints bind the
+                          ;; program that runs THERE: the inner code
+                          (filter (fn [ic] (empty? (violations far-text (:code ic)))) inner)
+                          inner)))})))))
 
 (defn- stack-candidates
   "Candidates for an explicitly requested context stack, outermost first,
