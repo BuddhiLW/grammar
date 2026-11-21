@@ -317,7 +317,9 @@
     :bin/<prog>     exec finds prog: an executable file on PATH (or prog
                     itself when it holds a slash). Builtins do not count.
     :sh.cmd/<prog>  the shell resolves the word prog (command -v): PATH,
-                    builtins and applets all count. sh runtimes only."
+                    builtins and applets all count. In a python runtime it
+                    is the sh probe lifted by sh-via-python: the law of the
+                    sh that python reaches."
   [lang cap]
   (let [prog (name cap)]
     (case [(namespace cap) lang]
@@ -333,6 +335,7 @@
                        {:cap cap :needs [:sh/printf :sh/single-quote]
                         :script (str "case $(command -v " q ") in '') printf %s no;; *) printf %s ok;; esac")
                         :expect "ok"})
+      ["sh.cmd" :python] (some-> (on-demand :sh cap) sh-via-python)
       nil)))
 
 (defn resolve-caps

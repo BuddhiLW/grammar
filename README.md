@@ -127,7 +127,14 @@ goes through `subprocess.run(["sh","-c",script])`, the argv
 These need `:py/subprocess` and `:interp/sh`, so `:sh/printf` and the
 quoting caps of a python runtime are the laws of the sh it reaches, and
 `:stack [:python :sh]` plans `:ok` on a python runtime with a working sh.
-Without subprocess or sh they are skipped and stay `:unknown`.
+Without subprocess or sh they are skipped and stay `:unknown`. The on-demand
+`:sh.cmd/<prog>` probe is lifted the same way, so `:run`, `:ensure-dir` and
+`:remove-file` under `[:python :sh]` resolve the commands they need. Not
+lifted: `:bin/<prog>` (exec on PATH, which a shell running an applet does not
+show; a python runtime answers it with `shutil.which`) and `:interp/python3`
+(the python3 an inner sh finds is another interpreter than the runtime's).
+Argv crosses into subprocess as UTF-8 bytes, so an ASCII locale
+(`LC_ALL=C`, `PYTHONUTF8=0`) cannot refuse non-ASCII text.
 
 A runtime whose top-level language has no probes (`:php`, `:perl`: their
 modules probe through sh) is refused by `discover!` with an ex-info naming

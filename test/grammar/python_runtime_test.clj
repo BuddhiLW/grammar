@@ -273,11 +273,16 @@
 (deftest bin-caps-follow-exec-not-the-shell
   (let [r (busybox-sh-rt!)
         prof (g/discover! r)
-        {res :result after :profile} (g/plan-resolving! r prof [:run {:argv ["tee" "/dev/null"]}])]
+        res (g/realize! r prof [:run {:argv ["tee" "/dev/null"]}] {:resolve true})
+        after (:profile-after res)]
     (is (= :yes (p/verdict prof :sh/pipe)) "busybox sh runs its tee applet in a pipe")
     (is (= :unknown (p/verdict prof :bin/tee)) "but no shell probe answers for exec")
     (is (= :no (p/verdict after :bin/tee)) "shutil.which finds no tee file on PATH")
-    (is (not= :ok (:status res)) "so :run of tee is never planned")))
+    (is (= :yes (p/verdict after :sh.cmd/tee)) "the inner sh resolves the tee applet")
+    (testing "so :py.run/subprocess is never planned: :run reroutes through sh, and runs"
+      (is (= :ok (:status res)))
+      (is (= [:ctx/python->sh :sh.run/words] (take 2 (:realization res))))
+      (is (true? (:ok? (:verified res))) (pr-str (:execution res))))))
 
 (deftest fs-probes-clean-up-and-ignore-proxies
   (let [tmp (fx/tmp-dir! "grammar-probe-tmp-")
@@ -295,6 +300,21 @@
           ev (get-in prof [:evidence (probe/evidence-id :py-nounlink :py/open-write)])]
       (is (= :yes (p/verdict prof :py/open-write)))
       (is (str/includes? (str (:err ev)) "cleanup failed, left") (pr-str ev)))))
+
+(deftest sh-commands-resolve-through-python
+  (let [r (py-rt! :py-shcmd [:sh :mkdir] {})
+        prof (g/discover! r)
+        d (str (fx/tmp-dir! "grammar-shcmd-") "/it's dir/c")]
+    (testing ":sh.cmd/mkdir is probed through subprocess and the sh plan runs"
+      (let [res (g/realize! r prof [:ensure-dir {:path d}] {:stack [:python :sh] :resolve true})]
+        (is (= :ok (:status res)))
+        (is (= [:ctx/python->sh :sh.ensure-dir/mkdir] (take 2 (:realization res))))
+        (is (= :yes (p/verdict (:profile-after res) :sh.cmd/mkdir)))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "a command the inner sh cannot resolve is refuted, not planned"
+      (let [{res :result after :profile} (g/plan-resolving! r prof [:remove-file {:path d}] {:stack [:python :sh]})]
+        (is (= :no (p/verdict after :sh.cmd/rm)))
+        (is (= :unsatisfiable (:status res)))))))
 
 (def ^:private ascii-env {"LC_ALL" "C" "PYTHONUTF8" "0" "PYTHONCOERCECLOCALE" "0"})
 
