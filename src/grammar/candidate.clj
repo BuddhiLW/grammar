@@ -178,7 +178,7 @@
   [f & seqs]
   (let [vs (vec seqs)
         zero (vec (repeat (count vs) 0))]
-    (walk-tuples f vs (push empty-queue (tuple-entry f vs zero) zero) nil)))
+    (lazy-seq (walk-tuples f vs (push empty-queue (tuple-entry f vs zero) zero) nil))))
 
 (defn weight
   "What realization r adds to a candidate's :cost: its :cost, except a
