@@ -30,7 +30,8 @@
   may come from a secret store."
   (:require [clojure.string :as str]
             [grammar.candidate :as c]
-            [grammar.lit :as lit]))
+            [grammar.lit :as lit]
+            [grammar.runtime :as rt]))
 
 (defn- lit-in [env lang s] ((:lit env) lang s))
 
@@ -92,3 +93,62 @@
                (apply c/combine (fn [f & ws] (str "printf " f " | " (str/join " " ws)))
                       (lit-in env :sh (lit/printf-format code))
                       (map #(lit-in env :sh %) fixed)))}))
+
+(def default-lits
+  "Literal encoders a hop renders with when no planner chose them: POSIX
+  single quotes for sh, single-quoted str for python."
+  {:sh lit/sh-single :python lit/py-single})
+
+(defn render-with
+  "The cheapest text of wrapper w around code, literals from lits
+  (lang -> encoder), or nil when it cannot carry code."
+  ([w code] (render-with w default-lits code))
+  ([w lits code]
+   (:code (first ((:render w) {:lit (fn [lang s] (c/leaf ((lits lang) s)))} code)))))
+
+(def posix-words-text
+  "What :sh/posix-words sends: one printf whose operand holds a newline, !,
+  a single quote, $, a backslash, a tab and a double space, in single
+  quotes and backslash escapes. csh rejects the newline and expands !,
+  fish keeps the backslashes, so neither prints the expected bytes."
+  "a\n!b'$c\\d\te  f")
+
+(def probes
+  "Probes of the far side of a hop, run IN the stacked runtime.
+    :sh/posix-words  the shell that parsed this program splits and
+                     unquotes words like POSIX sh: through a direct ssh
+                     hop that is the remote LOGIN shell."
+  [{:cap :sh/posix-words :needs [:sh/printf]
+    :script (str "printf %s " (lit/sh-single posix-words-text) "\\ \\\\")
+    :expect (str posix-words-text " \\")}])
+
+(defn reach-probe
+  "Probe, run in the hop's OUTER runtime, that the hop delivers a program
+  and returns its output: (:requires w)'s :reach/<route> cap."
+  [w]
+  {:cap (first (filter #(= "reach" (namespace %)) (:requires w)))
+   :needs [:sh/printf :sh/single-quote]
+   :script (render-with w "printf %s ok")
+   :expect "ok"})
+
+(defn hop-runtime
+  "The runtime on the far side of hop w, reached through outer (a runtime
+  whose language is (:outer w)). Its id is (:context w), so discovered
+  evidence reads ev.<context>/..., and its profile belongs under that key
+  of a planning env's :profiles."
+  ([outer w] (hop-runtime outer w default-lits))
+  ([outer w lits]
+   (rt/stacked-runtime {:id (keyword (str (namespace (:context w)) "." (name (:context w))))
+                        :lang (:inner w)
+                        :outer outer
+                        :wrap #(render-with w lits %)})))
+
+(defn chain-runtime
+  "The runtime at the end of hops ws, outermost first, from root."
+  [root ws]
+  (reduce hop-runtime root ws))
+
+(def module
+  "Relay hops as a grammar.core language module: no realizations, no fixed
+  wrappers (hops are built per destination), the far-side probes."
+  {:id :context :realizations [] :wrappers [] :probes #'probes})

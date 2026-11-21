@@ -52,3 +52,24 @@
   (default :sh) and :timeout-ms (default 10000)."
   [{:keys [id lang argv env timeout-ms] :or {lang :sh timeout-ms 10000}}]
   (->ProcessRuntime id lang (vec argv) env timeout-ms))
+
+(defrecord StackedRuntime [id lang outer wrap]
+  IRuntime
+  (runtime-id [_] id)
+  (runtime-lang [_] lang)
+  (execute [_ code]
+    (if-let [outer-code (wrap code)]
+      (assoc (execute outer outer-code) :relayed outer-code)
+      {:argv [] :error "the hop cannot carry this program"})))
+
+(defn stacked-runtime
+  "A runtime reached THROUGH another one: execute renders code with wrap
+  (fn [inner-code] -> outer-code, or nil when it cannot carry it) and runs
+  the result on outer. Nothing new starts processes: outer is the only
+  boundary. discover! on a stacked runtime therefore probes the far side
+  of the hop (the remote host, the privileged user), with evidence ids
+  derived from id.
+
+  opts: :id :lang (of the inner programs, default :sh) :outer :wrap."
+  [{:keys [id lang outer wrap] :or {lang :sh}}]
+  (->StackedRuntime id lang outer wrap))
