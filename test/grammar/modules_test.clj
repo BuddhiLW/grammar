@@ -37,7 +37,7 @@
   (is (= [:core :php :perl] (mapv :id core/modules)))
   (is (= {:realizations (into [] cat [realize/realizations php/realizations perl/realizations])
           :wrappers (into [] cat [realize/wrappers php/wrappers perl/wrappers])
-          :probes (into [] cat [probe/probes php/probes perl/probes])}
+          :probes (into [] cat [probe/catalog php/probes perl/probes])}
          (core/compose core/modules))))
 
 (deftest colliding-modules-are-refused
@@ -78,6 +78,18 @@
     (let [d (refusal #(core/compose [toy core/core-module]))]
       (is (= [:toy :core] (:modules d)))
       (is (some #{[:toy/printf :interp/sh]} (:unproved d)))))
+  (testing "needs are proved per script language: a python probe cannot lean on an sh probe"
+    (let [py-on-sh {:id :py-on-sh
+                    :probes [{:cap :toy/py :lang :python :needs [:sh/single-quote]
+                              :script "print()" :expect "ok"}]}
+          d (refusal #(core/compose [core/core-module py-on-sh]))]
+      (is (= [[:toy/py :sh/single-quote]] (:unproved d)))))
+  (testing "one cap may have one probe per language, never two in one language"
+    (let [twin {:id :twin :probes [{:cap :py/sys :lang :python :needs [] :script "x" :expect "ok"}]}
+          d (refusal #(core/compose [core/core-module twin]))]
+      (is (= [[:python :py/sys]] (get-in d [:duplicates :probes])))
+      (is (some #(= [:sh :py/sys] [(probe/probe-lang %) (:cap %)]) probe/catalog))
+      (is (some #(= [:python :py/sys] [(probe/probe-lang %) (:cap %)]) probe/catalog))))
   (testing "not a sequence of modules: a lone module map, nil, a map with no :id"
     (doseq [bad [toy nil [{:realizations []}]]]
       (is (contains? (refusal #(core/compose bad)) :modules) (pr-str bad))))

@@ -76,7 +76,7 @@
     :render (fn [env [_ s]]
               (c/combine #(str "printf " %) (lit-in env :sh (lit/printf-format s))))}
    {:id :py.str/stdout :intent :str :lang :python :cost 1
-    :requires #{:py/sys}
+    :requires #{:py/sys :py/stdout-buffer}
     :render (fn [env [_ s]]
               (c/combine #(str "import sys;sys.stdout.buffer.write(" % ".encode())")
                          (lit-in env :python s)))}
@@ -122,7 +122,7 @@
     :requires #{:sh.cmd/mkdir}
     :render (fn [env [_ {:keys [path]}]] (sh-words env ["mkdir" "-p" "--" path]))}
    {:id :py.ensure-dir/pathlib :intent :ensure-dir :lang :python :cost 1
-    :requires #{:py/pathlib}
+    :requires #{:py/pathlib :py.os/mkdir}
     :render (fn [env [_ {:keys [path]}]]
               (c/combine #(str "import pathlib;pathlib.Path(" % ").mkdir(parents=True,exist_ok=True)")
                          (lit-in env :python path)))}
@@ -132,7 +132,7 @@
     :requires #{:sh.cmd/rm}
     :render (fn [env [_ {:keys [path]}]] (sh-words env ["rm" "-f" "--" path]))}
    {:id :py.remove-file/pathlib :intent :remove-file :lang :python :cost 1
-    :requires #{:py/pathlib}
+    :requires #{:py/pathlib :py.os/unlink}
     :render (fn [env [_ {:keys [path]}]]
               (c/combine #(str "import pathlib;pathlib.Path(" % ").unlink(missing_ok=True)")
                          (lit-in env :python path)))}

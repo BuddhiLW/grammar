@@ -19,13 +19,14 @@
            [java.util Arrays]))
 
 (def core-module
-  "The built-in languages, :sh and :python. Its parts are vars, read by
+  "The built-in languages, :sh and :python. Its probes are grammar.probe/
+  catalog: the sh probes, then the python ones. Its parts are vars, read by
   compose at each call, so reloading grammar.realize or grammar.probe is seen
   without reloading this namespace."
   {:id :core
    :realizations #'realize/realizations
    :wrappers #'realize/wrappers
-   :probes #'probe/probes})
+   :probes #'probe/catalog})
 
 (def modules
   "The language modules the facade composes, in order. A module is data in
@@ -35,13 +36,23 @@
 
   Probes run in module order, so a module's probes may need capabilities
   that an earlier module proves. PHP and Perl are reached through sh and
-  their probes need :sh/single-quote, which is why :core comes first."
+  their probes need :sh/single-quote, which is why :core comes first.
+  A probe may carry :lang (default :sh), the language its script is
+  written in; discover! runs only the probes in the runtime's language.
+  :core writes probes in :sh and :python; PHP and Perl only in :sh."
   [core-module php/module perl/module])
 
 (defn- duplicates [xs]
   (into [] (keep (fn [[x n]] (when (< 1 n) x))) (frequencies xs)))
 
 (defn- part-value [x] (if (var? x) @x x))
+
+(defn- probe-key
+  "What two probes may not share: a capability in one script language. A
+  cap may have one probe per language (:py/pathlib written in sh and in
+  python), since a runtime runs only the probes of its own language."
+  [pr]
+  [(probe/probe-lang pr) (:cap pr)])
 
 (defn compose
   "One registry from mods: their realizations, wrappers and probes
@@ -51,11 +62,14 @@
   Refuses, as ex-info:
   - mods that is not a sequence of maps with an :id keyword;
   - two realizations or two wrappers with one id, or two probes for one
-    capability, because the solver orders by id and a profile keeps one
-    verdict per capability;
-  - a probe needing a capability that no earlier probe proves. Probes run
-    in this order, so such a probe would be skipped on every runtime and
-    its capability would stay :unknown forever."
+    capability in one script language (probe :lang, default :sh), because
+    the solver orders by id and a profile keeps one verdict per capability.
+    One cap may have an sh probe and a python probe: a runtime runs only
+    the probes of its own language, so it runs one of them;
+  - a probe needing a capability that no earlier probe of its language
+    proves. Probes run in this order, and only those of the runtime's
+    language run, so such a probe would be skipped on every runtime and its
+    capability would stay :unknown forever."
   [mods]
   (when-not (and (sequential? mods) (every? #(and (map? %) (keyword? (:id %))) mods))
     (throw (ex-info "modules must be a sequence of maps with an :id keyword" {:modules mods})))
@@ -67,12 +81,14 @@
                     (keep (fn [[k key-fn]]
                             (when-let [d (seq (duplicates (map key-fn (get reg k))))]
                               [k (vec d)])))
-                    [[:realizations :id] [:wrappers :id] [:probes :cap]])
+                    [[:realizations :id] [:wrappers :id] [:probes probe-key]])
         unproved (second
-                  (reduce (fn [[proved bad] {:keys [cap needs]}]
-                            [(conj proved cap)
-                             (into bad (for [n needs :when (not (proved n))] [cap n]))])
-                          [#{} []]
+                  (reduce (fn [[proved bad] {:keys [cap needs] :as pr}]
+                            (let [l (probe/probe-lang pr)
+                                  here (get proved l #{})]
+                              [(update proved l (fnil conj #{}) cap)
+                               (into bad (for [n needs :when (not (here n))] [cap n]))]))
+                          [{} []]
                           (:probes reg)))]
     (when (seq clash)
       (throw (ex-info "language modules collide" {:modules (mapv :id mods) :duplicates clash})))
@@ -81,12 +97,32 @@
                       {:modules (mapv :id mods) :unproved unproved})))
     reg))
 
+(defn discovery-probes
+  "The probes discover! runs in a runtime of language lang: the composed
+  probes of mods whose script is written in lang (probe :lang, default
+  :sh), in module order. Refuses, as ex-info, a language no module writes
+  probes in: :php and :perl modules probe through sh, so a runtime whose
+  top-level language is :php or :perl has nothing it could run, and an
+  empty profile would claim it had been looked at."
+  [mods lang]
+  (let [ps (:probes (compose mods))
+        mine (probe/for-lang lang ps)]
+    (when (empty? mine)
+      (throw (ex-info (str "no probe is written in " lang "; a runtime in that language cannot be discovered")
+                      {:lang lang :modules (mapv :id mods)
+                       :probe-langs (vec (distinct (map probe/probe-lang ps)))})))
+    mine))
+
 (defn discover!
   "Probe runtime with the probes of the language modules (opts :modules,
-  default `modules`) and return its evidence-backed profile."
+  default `modules`) written in the runtime's language, and return its
+  evidence-backed profile. An :sh runtime runs the sh probes, a :python
+  runtime the python ones; both prove the same cap names (:py/pathlib,
+  :interp/sh, ...). See discovery-probes for the languages refused."
   ([runtime] (discover! runtime {}))
   ([runtime {mods :modules :or {mods modules}}]
-   (probe/discover (rt/runtime-id runtime) #(rt/execute runtime %) (:probes (compose mods)))))
+   (probe/discover (rt/runtime-id runtime) #(rt/execute runtime %)
+                   (discovery-probes mods (rt/runtime-lang runtime)))))
 
 (defn env
   "Planning environment over the realizations and wrappers of the language
