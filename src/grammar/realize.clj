@@ -42,6 +42,12 @@
   [env words]
   (apply c/combine (fn [& ws] (str/join " " ws)) (map #(lit-in env :sh %) words)))
 
+(defn- http-only?
+  "True for a plain http:// URL: what a fetcher that cannot verify a TLS
+  certificate may serve."
+  [url]
+  (str/starts-with? url "http://"))
+
 (def realizations
   [;; ------------------------------------------------ literals: sh
    {:id :sh.lit/single :intent :lit :lang :sh :cost 1
@@ -133,28 +139,42 @@
 
    ;; ------------------------------------------------ :http-get  (response body on stdout, byte for byte)
    ;; Exit 0 on a 2xx answer, non-zero on a 4xx/5xx answer or a connection
-   ;; failure. Every realization follows redirects. The URL is one literal
-   ;; word after `--`; the Intent schema admits only http:// and https://, so
-   ;; no URL can start with `-` anyway.
+   ;; failure, a body shorter than its Content-Length included. The URL is
+   ;; one literal word after `--`; the Intent schema admits only http:// and
+   ;; https://, so no URL can start with `-` anyway.
+   ;;
+   ;; https needs a fetcher that verifies the server certificate. busybox
+   ;; wget does not (busybox 1.37 without openssl accepts a self-signed
+   ;; certificate, noting "TLS certificate validation not implemented"), so
+   ;; a wget not proven to be GNU Wget, and busybox wget, decline https URLs:
+   ;; they render no candidate for them.
    {:id :sh.http-get/curl :intent :http-get :lang :sh :cost 1
     :requires #{:sh.cmd/curl}
-    :doc "-q (first) skips .curlrc; -f fails on 4xx/5xx; -sS quiet but reports errors; -L follows redirects; -g turns URL globbing off, so [1-2] or {a,b} in a URL is one request, not several."
+    :doc "-q (first) skips .curlrc; -f fails on 4xx/5xx; -sS quiet but reports errors; -L follows redirects; -g turns URL globbing off, so [1-2] or {a,b} in a URL is one request, not several. A short body exits 18."
     :render (fn [env [_ {:keys [url]}]] (sh-words env ["curl" "-q" "-fsSLg" "--" url]))}
-   {:id :sh.http-get/wget :intent :http-get :lang :sh :cost 2
+   {:id :sh.http-get/gnu-wget :intent :http-get :lang :sh :cost 2
+    :requires #{:sh.cmd/wget :sh.wget/gnu}
+    :doc "GNU Wget, proven by its --version banner: verifies certificates, so it serves https too. --no-config (first) skips any wgetrc, which could turn check_certificate off; --tries=1 makes a short body exit 4 instead of retrying with Range requests."
+    :render (fn [env [_ {:keys [url]}]] (sh-words env ["wget" "--no-config" "--tries=1" "-qO-" "--" url]))}
+   {:id :sh.http-get/wget :intent :http-get :lang :sh :cost 3
     :requires #{:sh.cmd/wget}
-    :doc "GNU wget or a busybox wget applet: the flags and `--` mean the same to both."
-    :render (fn [env [_ {:keys [url]}]] (sh-words env ["wget" "-qO-" "--" url]))}
-   {:id :sh.http-get/busybox-wget :intent :http-get :lang :sh :cost 3
+    :doc "A wget not proven GNU, typically the busybox applet: http only. The flags and `--` mean the same to busybox and GNU."
+    :render (fn [env [_ {:keys [url]}]]
+              (when (http-only? url) (sh-words env ["wget" "-qO-" "--" url])))}
+   {:id :sh.http-get/busybox-wget :intent :http-get :lang :sh :cost 4
     :requires #{:sh.cmd/busybox}
-    :doc "The wget applet through the busybox binary, for a PATH with busybox but no wget. busybox wget accepts `--` (getopt), checked against busybox 1.37."
-    :render (fn [env [_ {:keys [url]}]] (sh-words env ["busybox" "wget" "-qO-" "--" url]))}
+    :doc "The wget applet through the busybox binary, for a PATH with busybox but no wget: http only. busybox wget accepts `--` (getopt), checked against busybox 1.37."
+    :render (fn [env [_ {:keys [url]}]]
+              (when (http-only? url) (sh-words env ["busybox" "wget" "-qO-" "--" url])))}
    {:id :py.http-get/urllib :intent :http-get :lang :python :cost 1
     :requires #{:py/urllib}
-    :doc "urlopen follows redirects and raises HTTPError for a 4xx/5xx answer and URLError when it cannot connect; sys.exit of the exception prints it on stderr and exits 1. The program text holds no quote character of its own."
+    :doc "urlopen follows 301, 302, 303 and 307 redirects (308 from Python 3.11 on), raises HTTPError for a 4xx/5xx answer and URLError when it cannot connect. A body shorter than its Content-Length leaves r.length non-zero (read(amt) returns b'' instead of raising IncompleteRead), so that raises too. sys.exit(repr(e)) prints the error on stderr and exits 1. The program text holds no quote character of its own."
     :render (fn [env [_ {:keys [url]}]]
               (c/combine #(str "import shutil,sys,urllib.request\n"
-                               "try:shutil.copyfileobj(urllib.request.urlopen(" % "),sys.stdout.buffer)\n"
-                               "except Exception as e:sys.exit(e)")
+                               "try:\n"
+                               " r=urllib.request.urlopen(" % ");shutil.copyfileobj(r,sys.stdout.buffer)\n"
+                               " if r.length:raise EOFError(r.length)\n"
+                               "except Exception as e:sys.exit(repr(e))")
                          (lit-in env :python url)))}])
 
 (def wrappers
