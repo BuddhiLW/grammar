@@ -25,12 +25,12 @@
   {:lit (fn [_ _] [{:code piece :via [] :requires #{} :stack [] :cost 0 :key []}])})
 
 (defn- shorter
-  "The outputs of render-fn, called with an env yielding piece, that are
-  shorter than floor bytes, as {:id :code}."
-  [id render-fn piece floor arg]
-  (for [cand (render-fn (piece-env piece) arg)
+  "The outputs of entry x's :render, called on arg with an env whose every
+  literal is piece, that are shorter than floor bytes, as {:id :code}."
+  [x piece floor arg]
+  (for [cand ((:render x) (piece-env piece) arg)
         :when (< (utf8-len (:code cand)) floor)]
-    {:id id :code (:code cand)}))
+    {:id (:id x) :code (:code cand)}))
 
 (defn length-law-violations
   "Every breach of the length law by the entries of registry
@@ -43,11 +43,11 @@
   (let [keeps (remove :shortens? realizations)]
     (vec (concat
           (for [r keeps :when (= :lit (:intent r))
-                v (shorter (:id r) (:render r) piece (utf8-len s) [:lit s])]
+                v (shorter r piece (utf8-len s) [:lit s])]
             v)
           (for [r keeps :when (not= :lit (:intent r))
-                v (shorter (:id r) (:render r) piece (utf8-len piece) (intent-of (:intent r) s))]
+                v (shorter r piece (utf8-len piece) (intent-of (:intent r) s))]
             v)
           (for [w (remove :shortens? wrappers)
-                v (shorter (:id w) (:render w) piece (utf8-len piece) s)]
+                v (shorter w piece (utf8-len piece) s)]
             v)))))

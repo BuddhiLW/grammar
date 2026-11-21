@@ -95,6 +95,21 @@
                         (update :pruned inc)
                         (update :min-bytes #(if % (min % len) len))))))
 
+(defn- prune-seq
+  "cands without those longer than n bytes, each one dropped charged to
+  meter m; ends, marking m :cut, once m's budget is spent."
+  [m n cands]
+  (lazy-seq
+   (cond
+     (some-> m spent?) (do (vswap! m assoc :cut true) nil)
+     (empty? cands) nil
+     :else (let [cand (first cands)
+                 len (utf8-len (:code cand))]
+             (if (<= len n)
+               (cons cand (prune-seq m n (rest cands)))
+               (do (some-> m (charge-prune! len))
+                   (prune-seq m n (rest cands))))))))
+
 (defn- within-len
   "cands without those whose code is longer than the profile's :max-len.
   Each one dropped is charged to the env's :meter, and the seq ends once
@@ -102,25 +117,13 @@
   past the budget. Off when the env's :prune? is false, as it is beneath
   an entry that declares :shortens?.
 
-  Sound by the length law (see grammar.realize): no encoder, realization
-  or wrapper output is shorter than what it embeds, so every program built
+  Sound by the length law (see grammar.law): no encoder, realization or
+  wrapper output is shorter than what it embeds, so every program built
   from a candidate that is too long is too long as well."
   [env cands]
-  (let [n (get-in env [:profile :text :max-len])
-        m (:meter env)]
+  (let [n (get-in env [:profile :text :max-len])]
     (if (and n (:prune? env true))
-      (letfn [(step [cs]
-                (lazy-seq
-                 (if (some-> m spent?)
-                   (do (vswap! m assoc :cut true) nil)
-                   (when-let [s (seq cs)]
-                     (let [cand (first s)
-                           len (utf8-len (:code cand))]
-                       (if (<= len n)
-                         (cons cand (step (rest s)))
-                         (do (some-> m (charge-prune! len))
-                             (step (rest s)))))))))]
-        (step cands))
+      (prune-seq (:meter env) n cands)
       cands)))
 
 (defn- direct-entries

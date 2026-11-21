@@ -71,13 +71,15 @@
     (when (= v ::timeout) (future-cancel fut))
     v))
 
-(defn- plan-with [prune? prof lang intent opts]
+(defn- plan-with
+  "solve for case [prof lang intent opts], pruning when prune?."
+  [prune? [prof lang intent opts]]
   (solve/solve (assoc (g/env prof) :prune? prune?) lang intent opts))
 
 (defspec pruning-changes-only-the-diagnostics 300
-  (prop/for-all [[prof lang intent opts] gen-case]
-    (let [pruned (within-ms 20000 #(plan-with true prof lang intent opts))
-          free (within-ms 20000 #(plan-with false prof lang intent opts))]
+  (prop/for-all [c gen-case]
+    (let [pruned (within-ms 20000 #(plan-with true c))
+          free (within-ms 20000 #(plan-with false c))]
       (or (some #{::timeout} [pruned free])
           (:budget-exhausted free)
           (:budget-exhausted pruned)
