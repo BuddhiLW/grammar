@@ -17,11 +17,13 @@
            [java.util Arrays]))
 
 (def core-module
-  "The built-in languages, :sh and :python."
+  "The built-in languages, :sh and :python. Its parts are vars, read by
+  compose at each call, so reloading grammar.realize or grammar.probe is seen
+  without reloading this namespace."
   {:id :core
-   :realizations realize/realizations
-   :wrappers realize/wrappers
-   :probes probe/probes})
+   :realizations #'realize/realizations
+   :wrappers #'realize/wrappers
+   :probes #'probe/probes})
 
 (def modules
   "The language modules the facade composes, in order. A module is data in
@@ -37,22 +39,44 @@
 (defn- duplicates [xs]
   (into [] (keep (fn [[x n]] (when (< 1 n) x))) (frequencies xs)))
 
+(defn- part-value [x] (if (var? x) @x x))
+
 (defn compose
   "One registry from mods: their realizations, wrappers and probes
-  concatenated in module order. Refuses two realizations or two wrappers with
-  one id, and two probes for one capability, because the solver orders by id
-  and the profile keeps one verdict per capability."
+  concatenated in module order. A module part may be a var, which is read
+  now, so a reloaded namespace is seen without reloading this one.
+
+  Refuses, as ex-info:
+  - mods that is not a sequence of maps with an :id keyword;
+  - two realizations or two wrappers with one id, or two probes for one
+    capability, because the solver orders by id and a profile keeps one
+    verdict per capability;
+  - a probe needing a capability that no earlier probe proves. Probes run
+    in this order, so such a probe would be skipped on every runtime and
+    its capability would stay :unknown forever."
   [mods]
-  (let [reg {:realizations (into [] (mapcat :realizations) mods)
-             :wrappers (into [] (mapcat :wrappers) mods)
-             :probes (into [] (mapcat :probes) mods)}
+  (when-not (and (sequential? mods) (every? #(and (map? %) (keyword? (:id %))) mods))
+    (throw (ex-info "modules must be a sequence of maps with an :id keyword" {:modules mods})))
+  (let [part (fn [k] (into [] (mapcat #(part-value (get % k))) mods))
+        reg {:realizations (part :realizations)
+             :wrappers (part :wrappers)
+             :probes (part :probes)}
         clash (into {}
                     (keep (fn [[k key-fn]]
                             (when-let [d (seq (duplicates (map key-fn (get reg k))))]
                               [k (vec d)])))
-                    [[:realizations :id] [:wrappers :id] [:probes :cap]])]
+                    [[:realizations :id] [:wrappers :id] [:probes :cap]])
+        unproved (second
+                  (reduce (fn [[proved bad] {:keys [cap needs]}]
+                            [(conj proved cap)
+                             (into bad (for [n needs :when (not (proved n))] [cap n]))])
+                          [#{} []]
+                          (:probes reg)))]
     (when (seq clash)
       (throw (ex-info "language modules collide" {:modules (mapv :id mods) :duplicates clash})))
+    (when (seq unproved)
+      (throw (ex-info "a probe needs a capability no earlier probe proves; put the module that proves it first"
+                      {:modules (mapv :id mods) :unproved unproved})))
     reg))
 
 (defn discover!
