@@ -330,6 +330,12 @@
   (is (= [0 0 :r/none] (c/realization-rank {:id :r/none})) "a missing :cost ranks as 0")
   (is (neg? (compare (c/realization-rank {:id :b :cost 9}) (c/wrapper-rank {:id :a :cost 0})))
       "a realization ranks before a wrapper whatever their costs")
+  (is (= [1 0 :w/none] (c/wrapper-rank {:id :w/none})) "a missing :cost ranks as 0")
+  (is (= 0 (c/weight {:id :r/none :intent :str})) "a missing :cost weighs 0")
+  (is (= 1 (:cost (c/enclose {:id :w/none :outer :sh} (cand "i" 1) (cand "o" 0))))
+      "a wrapper without :cost adds 0")
+  (let [open (constantly [])]
+    (is (= {:cost 1 :key [[0]] :open open} (c/bound 1 [[0]] open))))
   (is (= :bound (c/entry-kind (c/bound 1 [] (constantly [])))))
   (is (= {:cost 0 :key [] :stream [1]} (c/stream [1])))
   (is (= {:cost 2 :key [[0]] :stream nil} (c/stream 2 [[0]] nil))))
