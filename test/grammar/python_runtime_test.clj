@@ -13,7 +13,8 @@
             [grammar.probe :as probe]
             [grammar.profile :as p]
             [grammar.runtime :as rt]
-            [grammar.schema :as s])
+            [grammar.schema :as s]
+            [grammar.lit :as lit])
   (:import [java.io File]))
 
 (defn- site-dir!
@@ -204,7 +205,7 @@
     (let [sh-ps (into {} (map (juxt :cap identity)) probe/probes)]
       (doseq [{:keys [cap script needs lift]} probe/py-probes
               :when (not (false? lift))]
-        (is (= (str "python3 -c '" script "'") (:script (sh-ps cap))) (str cap))
+        (is (= (str "python3 -c " (lit/sh-single script)) (:script (sh-ps cap))) (str cap))
         (is (every? (set (:needs (sh-ps cap))) (conj needs :interp/python3)) (str cap))))))
 
 (deftest unprobed-languages-are-refused

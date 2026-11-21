@@ -132,12 +132,15 @@
   "The sh probe for python probe pr: its script run by `python3 -c`, one
   single-quoted word, needing what pr needs plus :interp/python3 and
   :sh/single-quote. The cap is pr's own, so :py/pathlib proved here and
-  :py/pathlib proved by a python runtime state one law."
-  [{:keys [needs script] :as pr}]
-  (-> pr
-      (dissoc :lang :lift)
-      (assoc :needs (into [:interp/python3 :sh/single-quote] (remove #{:interp/python3 :sh/single-quote}) needs)
-             :script (str "python3 -c " (lit/sh-single script)))))
+  :py/pathlib proved by a python runtime state one law. Refuses, as
+  ex-info, a script no sh word can hold (NUL)."
+  [{:keys [cap needs script] :as pr}]
+  (let [word (or (lit/sh-single script)
+                 (throw (ex-info "a python probe script with NUL cannot be lifted into sh" {:cap cap})))]
+    (-> pr
+        (dissoc :lang :lift)
+        (assoc :needs (into [:interp/python3 :sh/single-quote] (remove #{:interp/python3 :sh/single-quote}) needs)
+               :script (str "python3 -c " word)))))
 
 (def probes
   "The sh probes: scripts for a runtime whose language is :sh. Ordered so

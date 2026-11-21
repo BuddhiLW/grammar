@@ -98,9 +98,21 @@ absent). `discover!` runs only the probes in the runtime's language:
   and Perl modules' probes);
 - a `:python` runtime (`python3 -c`) runs `grammar.probe/py-probes`:
   `:py/sys`, `:py/stdout-buffer` (NUL, UTF-8 and CR LF through
-  `sys.stdout.buffer`), `:py/pathlib`, `:py/subprocess`, `:py/urllib`,
-  `:py.os/mkdir`, `:py.os/unlink`, and `:interp/sh` (subprocess runs
-  `["sh" "-c" ...]` with `sh` found on PATH).
+  `sys.stdout.buffer`), `:py/pathlib`, `:py/open-write` (write a file under
+  `$TMPDIR` and read it back), `:py.os/mkdir`, `:py.os/unlink` (make and
+  remove an entry there), `:py/subprocess` (run `sys.executable` as a child
+  and read its stdout), `:py/urllib` (fetch from a server the probe listens
+  with on 127.0.0.1), and `:interp/sh` (subprocess runs `["sh" "-c" ...]`
+  with `sh` found on PATH; with PATH unset python searches `os.defpath`,
+  exactly as `:ctx/python->sh` does).
+
+Each python probe performs the operation it proves, never only an import,
+so a runtime restricted by an audit hook (a `sitecustomize` raising on
+`subprocess.Popen`, `socket`, a write-mode `open`, ...) answers `:no`, with
+the refusal on the evidence's stderr. `:py.str/stdout` and
+`:py.http-get/urllib` require `:py/stdout-buffer`, and
+`:py.write-file/pathlib` requires `:py/open-write`: a declared profile that
+holds only `:py/sys` or `:py/pathlib` now plans them as `:blocked-on-unknown`.
 
 Cap names are shared. Every python probe except `:interp/sh` is also lifted
 into an sh probe that runs the same script as `python3 -c '<script>'`, so
