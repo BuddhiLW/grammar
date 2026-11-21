@@ -88,4 +88,7 @@
   (testing "core-module holds vars, so a redefined registry is seen without reloading core"
     (with-redefs [realize/wrappers []]
       (is (= [] (:wrappers (core/compose [core/core-module])))))
-    (is (= realize/wrappers (:wrappers (core/compose [core/core-module]))))))
+    (is (= realize/wrappers (:wrappers (core/compose [core/core-module])))))
+  (testing "so do the php and perl modules"
+    (with-redefs [php/wrappers [] perl/wrappers []]
+      (is (= realize/wrappers (:wrappers (core/compose core/modules)))))))

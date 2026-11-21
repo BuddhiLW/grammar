@@ -2,10 +2,10 @@
 ;; Copyright (C) 2026 buddhilw
 
 (ns grammar.lang.perl-test
-  "Perl target against the real perl. Environments are composed explicitly
-  (grammar.core still knows only :sh and :python; wiring it in is card
-  GRAMMAR-SEAM). Runtimes are real interpreters with PATH cut down to a
-  scratch bin dir, as in grammar.fixtures."
+  "Perl target against the real perl. Environments are composed explicitly,
+  so each test chooses exactly which realizations exist. Runtimes are real
+  interpreters with PATH cut down to a scratch bin dir, as in
+  grammar.fixtures."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
@@ -342,6 +342,13 @@
               run (rt/execute rt (:code res))]
           (is (= :ok (:status res)) (pr-str str-id s))
           (is (true? (:ok? (g/verify [:str s] run))) (pr-str str-id s (:err run))))))
+    (testing "unpinned :str through sh -> perl: the planner's own encoder choice keeps the bytes"
+      (doseq [s ["café" "it's café" "λ"]]
+        (let [res (g/plan prof :sh [:str s] {:stack [:sh :perl]})
+              run (rt/execute rt (:code res))]
+          (is (= :ok (:status res)) (pr-str s))
+          (is (not-any? #{:pl.lit/single} (:realization res)) (pr-str s (:realization res)))
+          (is (true? (:ok? (g/verify [:str s] run))) (pr-str s (:realization res) (:out run))))))
     (testing ":write-file through sh -> perl: open and sysopen"
       (doseq [[label prof'] [["open" prof]
                              ["sysopen" (p/declare-cap prof :pl/open-write :no "test: force sysopen")]]]

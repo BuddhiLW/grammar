@@ -57,7 +57,9 @@
                          [:sh/redirect :bin/tee :interp/python3 :interp/sh])
           res (g/plan prof :sh wf)]
       (is (= :blocked-on-unknown (:status res)))
-      (is (some #{:interp/php :interp/perl} (:unknowns res))))))
+      (is (every? (set (:unknowns res)) [:interp/php :interp/perl]))
+      (is (= [:interp/perl :pl/binmode :pl/open-write :pl/print] (:needs res))
+          "sh->perl and sh->php tie at cost 11; the tie goes to the lower id"))))
 
 (deftest text-constraints-steer-the-choice
   (testing "forbidding ' pushes content into octal printf, quoted with \""
