@@ -39,45 +39,67 @@
 (defn- render-env [env visited]
   {:lit (fn [lang text] (candidates env visited lang [:lit text]))})
 
-(defn- direct [env visited lang [op :as intent]]
+(defn- direct-entries
+  "One bound per admitted realization of intent in lang, costing the
+  realization's weight until it is rendered."
+  [env visited lang [op :as intent]]
   (for [r (get-in env [:by-key [op lang]])
         :let [r (assoc r :requires (requires-of r intent))]
-        :when ((:admit env) (:requires r))
-        cand ((:render r) (render-env env visited) intent)]
-    (c/stamp cand r lang)))
+        :when ((:admit env) (:requires r))]
+    {:cost (c/weight r)
+     :key [[0 (:cost r 0) (:id r)]]
+     :open #(map (fn [cand] (c/stamp cand r lang))
+                 ((:render r) (render-env env visited) intent))}))
 
-(defn- wrap [env visited w inner-cands]
-  (for [ic inner-cands
-        oc ((:render w) (render-env env visited) (:code ic))]
-    {:code (:code oc)
-     :via (into [(:id w)] (concat (:via ic) (:via oc)))
-     :requires (into (set (:requires w)) (concat (:requires ic) (:requires oc)))
-     :stack (into [(:outer w)] (:stack ic))}))
+(defn- wrap
+  "Ascending bounds, one per inner candidate (ascending itself), each
+  opening the candidates of wrapper w around it."
+  [env visited w inner-cands]
+  (let [rank [1 (:cost w 0) (:id w)]]
+    (map (fn [ic]
+           (let [cost (+ (:cost w 0) (:cost ic))
+                 key (into [rank] (:key ic))]
+             {:cost cost
+              :key key
+              :open #(map (fn [oc]
+                            {:code (:code oc)
+                             :via (into [(:id w)] (concat (:via ic) (:via oc)))
+                             :requires (into (set (:requires w)) (concat (:requires ic) (:requires oc)))
+                             :stack (into [(:outer w)] (:stack ic))
+                             :cost (+ cost (:cost oc))
+                             :key (into key (:key oc))})
+                          ((:render w) (render-env env visited) (:code ic)))}))
+         inner-cands)))
 
 (defn candidates
-  "Lazy, deterministic seq of candidates for intent in lang. visited holds
-  the languages already on the context stack, so delegation never cycles."
+  "Lazy, deterministic seq of candidates for intent in lang, cheapest total
+  cost first; ties go to a direct realization, then by cost and id. visited
+  holds the languages already on the context stack, so delegation never
+  cycles."
   [env visited lang intent]
-  (concat
-   (direct env visited lang intent)
-   (when-not (= :lit (first intent))
-     (mapcat (fn [w]
-               (wrap env visited w
-                     (candidates env (conj visited (:inner w)) (:inner w) intent)))
-             (filter (fn [w] (and (= lang (:outer w))
-                                  (not (visited (:inner w)))
-                                  ((:admit env) (:requires w))))
-                     (:wrappers env))))))
+  (c/best-first
+   (concat
+    (direct-entries env visited lang intent)
+    (when-not (= :lit (first intent))
+      (for [w (:wrappers env)
+            :when (and (= lang (:outer w))
+                       (not (visited (:inner w)))
+                       ((:admit env) (:requires w)))]
+        {:cost (:cost w 0)
+         :key [[1 (:cost w 0) (:id w)]]
+         :open #(wrap env visited w
+                      (candidates env (conj visited (:inner w)) (:inner w) intent))})))))
 
 (defn- stack-candidates
-  "Candidates for an explicitly requested context stack, outermost first."
+  "Candidates for an explicitly requested context stack, outermost first,
+  cheapest first."
   [env [lang & more] intent]
   (if-let [inner (first more)]
     (let [w (first (filter #(and (= lang (:outer %)) (= inner (:inner %))) (:wrappers env)))]
       (if (and w ((:admit env) (:requires w)))
-        (wrap env #{lang} w (stack-candidates env more intent))
+        (c/best-first [{:cost 0 :key [] :stream (wrap env #{lang} w (stack-candidates env more intent))}])
         ()))
-    (direct env #{lang} lang intent)))
+    (c/best-first (direct-entries env #{lang} lang intent))))
 
 ;; ---------------------------------------------------------------- text constraints
 
