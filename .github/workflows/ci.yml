@@ -41,8 +41,10 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq busybox dash php-cli perl
+          sudo apt-get install -y -qq busybox dash php-cli perl curl wget
           for b in /usr/bin/bash /usr/bin/dash /usr/bin/busybox; do test -x "$b"; done
+          for t in curl wget; do test -x "$(command -v "$t")"; done
+          wget --version | sed -n 1p
           python3 --version
           php --version | head -n1
           perl -e 'print "perl $^V\n"'
