@@ -1,0 +1,7 @@
+{:empty [],
+ :empty-stream [["z" 1]],
+ :key-ties [["x" 1] ["y" 1]],
+ :mixed [["s0" 0] ["w1" 2] ["s3" 3] ["direct" 4] ["w2" 5] ["s6" 6]],
+ :nested [["deep" 2] ["shallow" 3]],
+ :plain [["a" 1] ["b" 2] ["c" 3]],
+ :push-order [["first" 1] ["second" 1]]}

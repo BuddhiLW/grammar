@@ -90,6 +90,15 @@
           (is (seq (get-in res [:constraints :requires])))
           (is (seq (:evidence res))))))))
 
+(deftest cheapest-nested-stack-wins
+  (let [prof (declared :nested
+                       [:sh/single-quote :interp/python3 :py/subprocess :interp/php :interp/perl
+                        :php.fn/fwrite :php.fn/strlen :pl/binmode :pl/print]
+                       [:sh/printf :py/sys :py/stdout-buffer :sh/double-quote :sh/ansi-c-quote])]
+    (is (= [:ctx/sh->perl :pl.str/print :pl.lit/single :sh.lit/single]
+           (:realization (g/plan prof :sh [:str "hi"])))
+        "cheapest total cost, not the first depth-first stack (sh->python->php)")))
+
 (deftest invalid-intent-is-refused
   (is (= :invalid (:status (g/plan full :sh [:http-get {:url "x"}]))))
   (is (= :invalid (:status (g/plan full :sh [:write-file {:path "/x"}])))))
