@@ -47,7 +47,7 @@ NODES = {
 
 Vagrant.configure("2") do |config|
   config.vm.synced_folder ".", "/vagrant", disabled: true
-  config.ssh.insert_key = true
+  config.ssh.insert_key = false
   NODES.each do |name, n|
     config.vm.define name do |c|
       c.vm.box = n[:box]
