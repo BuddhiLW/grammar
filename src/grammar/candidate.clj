@@ -170,15 +170,29 @@
      (when-let [[e queue] (pop-min queue)]
        (cons (dissoc e :t) (walk-tuples f vs queue e))))))
 
-(defn combine
-  "Lazy product of candidate seqs, cheapest total cost first. Each seq must
-  be ascending by :cost. f receives the codes and returns the combined code.
-  Ties pop by key, then by index tuple, so the walk is deterministic. An
-  element of an input seq is realized only once an output needs it."
-  [f & seqs]
+(defn best-first-product
+  "Lazy product of the candidate seqs in seqs, cheapest total cost first.
+  Each seq must be ascending by :cost. f receives the codes and returns the
+  combined code. Ties pop by key, then by index tuple, so the walk is
+  deterministic. An element of an input seq is realized only once an
+  output needs it."
+  [f seqs]
   (let [vs (vec seqs)
         zero (vec (repeat (count vs) 0))]
     (lazy-seq (walk-tuples f vs (push empty-queue (tuple-entry f vs zero) zero) nil))))
+
+(def ^:dynamic *product*
+  "How combine builds a product: (fn [f seqs] candidates). Default
+  best-first-product. The seam a reference test binds to the full,
+  unordered product, to check the search against an enumeration that does
+  not share its ordering code."
+  best-first-product)
+
+(defn combine
+  "Lazy product of candidate seqs, cheapest total cost first (see
+  best-first-product, the default *product*)."
+  [f & seqs]
+  (*product* f seqs))
 
 (defn weight
   "What realization r adds to a candidate's :cost: its :cost, except a

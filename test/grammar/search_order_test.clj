@@ -14,8 +14,8 @@
             [grammar.solve :as solve]))
 
 (defn- product
-  "Reference combine: the full product in index-tuple order, unsorted."
-  [f & seqs]
+  "Reference product: the full product in index-tuple order, unsorted."
+  [f seqs]
   (map #(c/merge-parts f %)
        (reduce (fn [acc s] (for [xs acc x s] (conj xs x))) [[]] seqs)))
 
@@ -41,7 +41,7 @@
 (defn reference
   "What solve/candidates must equal: a stable sort by :cost of the DFS."
   [env lang intent]
-  (with-redefs [c/combine product]
+  (binding [c/*product* product]
     (doall (sort-by :cost (dfs env #{lang} lang intent)))))
 
 (def caps
