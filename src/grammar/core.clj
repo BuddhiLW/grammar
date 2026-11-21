@@ -110,8 +110,8 @@
 (defn effect
   "Observe, with no run, whether the state that intent describes holds now:
   {:check kw :holds? bool}. Defined for state intents (:write-file,
-  :ensure-dir, :remove-file); nil for :str and :run, whose effect exists only
-  as the output of a run. The observation reads this JVM's filesystem, so it
+  :ensure-dir, :remove-file); nil for :str, :run and :http-get, whose effect
+  exists only as the output of a run. The observation reads this JVM's filesystem, so it
   is only meaningful for a runtime that shares it."
   [[op arg :as _intent]]
   (case op
@@ -127,14 +127,16 @@
 
 (defn verify
   "Check the observable effect of intent against what the run produced. A
-  state intent verifies when the run exited 0 and its effect holds after it."
+  state intent verifies when the run exited 0 and its effect holds after it.
+  :run and :http-get verify on exit 0: the bytes an :http-get fetched are
+  the server's to know, so the caller compares (:out-bytes run) itself."
   [[op arg :as intent] run]
   (case op
     :str (let [ok (and (= 0 (:exit run))
                        (some? (:out-bytes run))
                        (Arrays/equals (utf8 arg) ^bytes (:out-bytes run)))]
            {:check :stdout-bytes :exit (:exit run) :ok? ok})
-    :run {:check :exit-zero :exit (:exit run) :ok? (= 0 (:exit run))}
+    (:run :http-get) {:check :exit-zero :exit (:exit run) :ok? (= 0 (:exit run))}
     (let [{:keys [holds?] :as e} (effect intent)]
       (-> (dissoc e :holds?)
           (assoc :exit (:exit run) :ok? (and (= 0 (:exit run)) holds?))))))

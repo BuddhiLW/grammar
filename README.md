@@ -49,10 +49,28 @@ io.github.buddhilw/grammar {:mvn/version "0.1.1"}
   context wrapper.
 - `[:remove-file {:path p}]`: `p` is not a file (absent is fine). `rm -f --`
   or python `pathlib.unlink(missing_ok=True)`.
+- `[:http-get {:url u}]`: write the response body to stdout byte for byte;
+  exit 0 on a 2xx answer, non-zero on a 4xx/5xx answer or a connection
+  failure, a body shorter than its `Content-Length` included. 301, 302, 303
+  and 307 redirects are followed (308 too, except by python urllib before
+  3.11). Only `http://` and `https://` URLs without control characters are
+  accepted, so a URL can never start with `-`. In order of cost:
+  `curl -q -fsSLg --` (`:sh.cmd/curl`), `wget --no-config --tries=1 -qO- --`
+  (`:sh.cmd/wget` plus `:sh.wget/gnu`, probed from `wget --version`),
+  `wget -qO- --` (a wget not proven GNU, e.g. the busybox applet),
+  `busybox wget -qO- --` (`:sh.cmd/busybox`), python `urllib.request`
+  (`:py/urllib`), directly or through `:ctx/sh->python`. busybox wget does
+  not verify TLS certificates, so the last two wget forms decline `https://`
+  URLs; on a runtime whose only fetcher is busybox, an https get is
+  unsatisfiable. The URL is a literal like any other string, so
+  `:forbid` and `:max-len` apply to it. Verified by exit status 0; the tools
+  differ on URLs a URI cannot hold as written (a raw space: GNU wget
+  percent-encodes it, curl and urllib refuse it, busybox sends it and the
+  server answers 400).
 
 `(grammar.core/effect intent)` observes, with no run, whether a state intent
 (`:write-file`, `:ensure-dir`, `:remove-file`) already holds:
-`{:check kw :holds? bool}`, or `nil` for `:str` and `:run`. A caller can skip
+`{:check kw :holds? bool}`, or `nil` for `:str`, `:run` and `:http-get`. A caller can skip
 work that is already done. `verify` is that same observation after a run,
 plus exit status 0. Both read the local filesystem, so they only apply to a
 runtime that shares it.

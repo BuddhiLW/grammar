@@ -25,7 +25,10 @@
    :tee (which "tee")
    :python3 (which "python3")
    :mkdir (which "mkdir")
-   :rm (which "rm")})
+   :rm (which "rm")
+   :curl (which "curl")
+   :wget (which "wget")
+   :busybox "/usr/bin/busybox"})
 
 (defn tmp-dir! [prefix]
   (str (Files/createTempDirectory prefix (make-array FileAttribute 0))))
@@ -35,9 +38,12 @@
   [ks]
   (let [dir (File. ^String (tmp-dir! "grammar-bin-"))]
     (doseq [k ks]
-      (Files/createSymbolicLink (.toPath (File. dir (name k)))
-                                (.toPath (File. ^String (tools k)))
-                                (make-array FileAttribute 0)))
+      (let [target (or (tools k)
+                       (throw (ex-info (str "tool " (name k) " is not on the host PATH")
+                                       {:tool k :path (System/getenv "PATH")})))]
+        (Files/createSymbolicLink (.toPath (File. dir (name k)))
+                                  (.toPath (File. ^String target))
+                                  (make-array FileAttribute 0))))
     (str dir)))
 
 (def shells

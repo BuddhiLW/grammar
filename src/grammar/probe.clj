@@ -44,7 +44,12 @@
    {:cap :py/pathlib      :needs [:interp/python3 :sh/single-quote]
     :script "python3 -c 'import pathlib,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
    {:cap :py/subprocess   :needs [:interp/python3 :sh/single-quote]
-    :script "python3 -c 'import subprocess,sys;sys.stdout.write(\"ok\")'" :expect "ok"}])
+    :script "python3 -c 'import subprocess,sys;sys.stdout.write(\"ok\")'" :expect "ok"}
+   {:cap :sh.wget/gnu     :needs [:sh/printf :sh/single-quote]
+    :doc "The wget the shell resolves is GNU Wget, which verifies TLS certificates. busybox wget rejects --version, so it prints no; so does a shell with no wget."
+    :script "case $(wget --version) in 'GNU Wget'*) printf %s ok;; *) printf %s no;; esac" :expect "ok"}
+   {:cap :py/urllib       :needs [:interp/python3 :sh/single-quote]
+    :script "python3 -c 'import shutil,sys,urllib.request;sys.stdout.write(\"ok\")'" :expect "ok"}])
 
 (defn judge
   "Verdict of one probe run. A run that never happened proves nothing."
