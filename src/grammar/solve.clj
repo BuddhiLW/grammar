@@ -101,8 +101,8 @@
   [m n cands]
   (lazy-seq
    (cond
-     (some-> m spent?) (do (vswap! m assoc :cut true) nil)
      (empty? cands) nil
+     (some-> m spent?) (do (vswap! m assoc :cut true) nil)
      :else (let [cand (first cands)
                  len (utf8-len (:code cand))]
              (if (<= len n)

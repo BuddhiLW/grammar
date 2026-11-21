@@ -70,12 +70,14 @@
       (is (= [:sh.write-file/redirect-octal :sh.lit/double :sh.lit/double] (:realization res)))
       (is (not (.contains ^String (:code res) "'")))
       (is (some #{:ev.full/declared.text.forbid} (:evidence res)))))
-  (testing "a length budget nothing fits is unsatisfiable; every candidate is pruned unexamined"
+  (testing "a length budget nothing fits is unsatisfiable, and says by how much"
     (let [prof (p/declare-text full :max-len 20 "test")
           res (g/plan prof :sh wf)]
       (is (= :unsatisfiable (:status res)))
-      (is (= 0 (:searched res)) "nothing that short exists, so nothing reaches the text check")
-      (is (pos? (:pruned res)) "the skipped work is still reported")))
+      (is (pos? (:pruned res)) "the skipped work is still reported")
+      (is (< 20 (:pruned-min-bytes res)) "the shortest program pruned is over the limit")
+      (is (every? #(not-any? #{:max-len} (map :constraint (:violations %))) (:rejected res))
+          "no length refusal reaches the text check")))
   (testing "pruning keeps the program a length budget admits"
     (let [code (:code (g/plan full :sh wf))
           tight (g/plan (p/declare-text full :max-len (count (.getBytes ^String code "UTF-8")) "test") :sh wf)]
@@ -148,6 +150,16 @@
           (is (:budget-exhausted res))
           (is (not= :ok (:status res)) "\"direct\" costs 5, more than the cheaper program past the cut")
           (is (= (:status (plan false budget)) (:status res))))))
+    (testing "a budget that covers every candidate exactly is not exhausted"
+      (let [bang {:id :t.str/bang :intent :str :lang :python :cost 0 :requires #{}
+                  :render (fn [_ _] (map #(hash-map :code (str "!" %) :via [] :requires #{} :stack [] :cost 0 :key [])
+                                         (range 51)))}
+            res (solve/solve (solve/make-env (p/declare-text (p/empty-profile :t) :forbid #{"!"} "test")
+                                             {:realizations [bang]})
+                             :python [:str "x"] {:budget 51})]
+        (is (= :unsatisfiable (:status res)))
+        (is (= 51 (:searched res)) "all 51 programs examined and rejected")
+        (is (not (:budget-exhausted res)))))
     (testing "with room for the fitting program, both find it"
       (is (= "p py" (:code (plan true 60))))
       (is (= "p py" (:code (plan false 60)))))))
