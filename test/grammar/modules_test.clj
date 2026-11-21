@@ -87,5 +87,5 @@
 (deftest the-registry-is-read-at-call-time
   (testing "core-module holds vars, so a redefined registry is seen without reloading core"
     (with-redefs [realize/wrappers []]
-      (is (= [] (:wrappers (core/compose core/modules)))))
-    (is (= realize/wrappers (:wrappers (core/compose core/modules))))))
+      (is (= [] (:wrappers (core/compose [core/core-module])))))
+    (is (= realize/wrappers (:wrappers (core/compose [core/core-module]))))))
