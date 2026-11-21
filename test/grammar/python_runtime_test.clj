@@ -14,7 +14,9 @@
             [grammar.profile :as p]
             [grammar.runtime :as rt]
             [grammar.schema :as s]
-            [grammar.lit :as lit])
+            [grammar.lit :as lit]
+            [clojure.test.check.generators :as gen]
+            [hive-test.trifecta :refer [deftrifecta]])
   (:import [java.io File]))
 
 (defn- site-dir!
@@ -69,15 +71,19 @@
 
 (def py-caps (mapv :cap probe/py-probes))
 
+(def py-sh-caps
+  "The sh caps a python runtime probes through subprocess."
+  (mapv :cap probe/py-sh-probes))
+
 (deftest python-runtimes-run-python-probes
   (doseq [[id prof] @profs]
     (testing (str id)
       (is (s/profile? prof))
-      (testing "only python probes ran: no sh-only cap was probed"
-        (is (= (set py-caps) (set (keys (:caps prof)))))
-        (is (not (contains? (:caps prof) :sh/printf))))
+      (testing "only python probes ran: the python laws and the sh ones lifted through subprocess"
+        (is (= (set (concat py-caps py-sh-caps)) (set (keys (:caps prof)))))
+        (is (not (contains? (:caps prof) :interp/php)) "php and perl probe only through sh"))
       (testing "law 1 + 2: one evidence entry per cap, matching its verdict"
-        (doseq [cap py-caps]
+        (doseq [cap (concat py-caps py-sh-caps)]
           (let [ids (get-in prof [:caps cap :evidence])
                 ev (get-in prof [:evidence (first ids)])]
             (testing (str cap)
@@ -169,19 +175,23 @@
 (deftest delegation-to-sh-follows-the-evidence
   (let [{:keys [py-full py-nosub py-nosh]} @profs
         sh-plan #(g/plan % :python [:str "x"] {:stack [:python :sh]})]
-    (testing "full: the wrapper is admitted; only the inner sh's grammar, never probed from python, blocks"
-      (let [res (sh-plan py-full)]
-        (is (= :blocked-on-unknown (:status res)))
-        (is (= :ctx/python->sh (first (:would-select res))))
-        (is (seq (:needs res)))
-        (is (every? #(= "sh" (namespace %)) (:needs res)) (pr-str (:needs res)))))
-    (testing "full: declaring the inner sh's grammar lets python->sh run for real"
-      (let [prof (reduce #(p/declare-cap %1 %2 :yes "test: the PATH sh is dash")
-                         py-full [:sh/printf :sh/single-quote])
-            res (g/realize! (:py-full @rts) prof [:str "via sh's printf"] {:stack [:python :sh]})]
-        (is (= :ok (:status res)))
-        (is (= :ctx/python->sh (first (:realization res))))
+    (testing "full: python probed the grammar of the sh it reaches, so python->sh plans and runs"
+      (let [res (g/realize! (:py-full @rts) py-full [:str "via sh's printf: it's \u00e9"] {:stack [:python :sh]})]
+        (is (= :ok (:status res)) (pr-str (:needs res)))
+        (is (= [:ctx/python->sh :sh.str/printf :sh.lit/single] (take 3 (:realization res))))
+        (is (= [:python :sh] (:stack res)))
+        (is (every? #(contains? (:evidence py-full) %) (:evidence res)))
+        (is (some #{(probe/evidence-id :py-full :sh/single-quote)} (:evidence res)))
         (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "full: the lifted sh verdicts are dash's, judged by the sh probes' own expect"
+      (is (= :yes (p/verdict py-full :sh/printf)))
+      (is (= :no (p/verdict py-full :sh/ansi-c-quote)) "dash has no $'...'")
+      (is (= :no (p/verdict py-full :interp/python3)) "PATH holds only sh"))
+    (testing "the lifted sh probes are skipped where subprocess or sh is refuted"
+      (doseq [[prof id why] [[py-nosub :py-nosub ":py/subprocess=no"] [py-nosh :py-nosh ":interp/sh=no"]]
+              cap py-sh-caps]
+        (is (= :unknown (p/verdict prof cap)) (str id cap))
+        (is (str/includes? (str (get-in prof [:evidence (probe/evidence-id id cap) :reason])) why) (str id cap))))
     (testing "subprocess refuted: python->sh is unsatisfiable, the refutation is cited"
       (let [res (sh-plan py-nosub)]
         (is (= :unsatisfiable (:status res)))
@@ -201,12 +211,49 @@
           py-prof (:py-full @profs)]
       (doseq [cap (remove #{:interp/sh} py-caps)]
         (is (= :yes (p/verdict sh-prof cap) (p/verdict py-prof cap)) (str cap)))))
+  (testing "a python runtime proves the sh laws of the sh it reaches under the same names"
+    (let [sh-prof (g/discover! (fx/sh-runtime! :sh-shared :dash [:sh]))
+          py-prof (:py-full @profs)]
+      (doseq [cap py-sh-caps]
+        (is (= (p/verdict sh-prof cap) (p/verdict py-prof cap)) (str cap)))))
+  (testing "every lifted sh probe runs the sh script verbatim through subprocess, same expect"
+    (let [sh-ps (into {} (map (juxt :cap identity)) probe/probes)]
+      (doseq [{:keys [cap script expect needs]} probe/py-sh-probes]
+        (is (str/includes? script (str "[\"sh\",\"-c\"," (lit/py-double (:script (sh-ps cap))) "]")) (str cap))
+        (is (= (:expect (sh-ps cap)) expect) (str cap))
+        (is (every? (set needs) (concat [:py/subprocess :interp/sh] (:needs (sh-ps cap)))) (str cap)))))
   (testing "every python probe but :interp/sh is lifted into an sh probe running python3 -c"
     (let [sh-ps (into {} (map (juxt :cap identity)) probe/probes)]
       (doseq [{:keys [cap script needs lift]} probe/py-probes
               :when (not (false? lift))]
         (is (= (str "python3 -c " (lit/sh-single script)) (:script (sh-ps cap))) (str cap))
         (is (every? (set (:needs (sh-ps cap))) (conj needs :interp/python3)) (str cap))))))
+
+(def ^:private orig-sh-via-python probe/sh-via-python)
+
+(def ^:private gen-sh-probe
+  "An sh probe: printable ASCII script (quotes, backslashes, $ included), needs from a small pool."
+  (gen/let [script (gen/fmap str/join (gen/vector (gen/fmap char (gen/choose 32 126)) 0 20))
+            needs (gen/vector-distinct (gen/elements [:sh/printf :sh/single-quote :interp/sh :sh/pipe]))]
+    {:cap :sh/x :needs needs :script script :expect "ok"}))
+
+(deftrifecta sh-via-python
+  grammar.probe/sh-via-python
+  {:golden-path "test/golden/probe/sh-via-python.edn"
+   :cases {:printf (first probe/probes)
+           :quotes {:cap :sh/q :needs [:sh/printf] :script "printf %s \"o\"'k' \\ $HOME" :expect "ok"}
+           :overlap {:cap :sh/o :needs [:interp/sh :sh/printf] :script "sh -c 'printf %s ok'" :expect "ok"}}
+   :gen gen-sh-probe
+   :pred (fn [{:keys [lang lift needs script expect]}]
+           (and (= :python lang) (false? lift) (= "ok" expect)
+                (= [:py/sys :py/stdout-buffer :py/subprocess :interp/sh] (take 4 needs))
+                (= (count needs) (count (distinct needs)))
+                (str/includes? script "[\"sh\",\"-c\",")))
+   :mutations [["keeps-sh-lang" (fn [pr] (dissoc (orig-sh-via-python pr) :lang))]
+               ["liftable" (fn [pr] (dissoc (orig-sh-via-python pr) :lift))]
+               ["drops-inner-needs" (fn [pr] (assoc (orig-sh-via-python pr) :needs [:py/sys :py/stdout-buffer :py/subprocess :interp/sh]))]
+               ["no-interp-sh" (fn [pr] (update (orig-sh-via-python pr) :needs #(vec (remove #{:interp/sh} %))))]
+               ["unquoted" (fn [pr] (update (orig-sh-via-python pr) :script str/replace "\\\"" "\""))]]})
 
 (deftest unprobed-languages-are-refused
   (doseq [lang [:php :perl]]

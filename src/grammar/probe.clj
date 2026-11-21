@@ -175,6 +175,37 @@
              :doc "The wget the shell resolves is GNU Wget, which verifies TLS certificates. busybox wget rejects --version, so it prints no; so does a shell with no wget."
              :script "case $(wget --version) in 'GNU Wget'*) printf %s ok;; *) printf %s no;; esac" :expect "ok"})))
 
+(defn sh-via-python
+  "The python probe for sh probe pr: its script run as
+  subprocess.run([\"sh\",\"-c\",script]), the argv :ctx/python->sh runs,
+  its stdout copied byte for byte and judged by the same :expect. It needs
+  what pr needs plus :py/sys, :py/stdout-buffer, :py/subprocess and
+  :interp/sh. The cap is pr's own: in a python runtime :sh/printf names
+  the law of the sh that python reaches, as :py/pathlib in an sh runtime
+  names the law of the python3 it reaches. Marked :lift false, so it is
+  never lifted back into sh."
+  [{:keys [needs script] :as pr}]
+  (assoc pr
+         :lang :python :lift false
+         :needs (into [:py/sys :py/stdout-buffer :py/subprocess :interp/sh]
+                      (remove #{:py/sys :py/stdout-buffer :py/subprocess :interp/sh}) needs)
+         :script (guarded "subprocess"
+                          (str "o=subprocess.run([\"sh\",\"-c\"," (lit/py-double script)
+                               "],stdout=subprocess.PIPE).stdout")
+                          "sys.stdout.buffer.write(o);sys.stdout.buffer.flush()")))
+
+(def py-sh-probes
+  "The sh probes a python runtime runs through subprocess: every sh probe
+  whose cap has no python probe of its own (so not the lifted :py/ laws,
+  nor :interp/sh), lifted by sh-via-python, in sh order. They follow
+  py-probes, which proves the :py/ caps they need.
+
+  This is the probe-side half of a python->sh context layer: a general
+  stacked runtime that probes an inner language through a wrapper would
+  produce these by running the sh probes through :ctx/python->sh."
+  (let [native (into #{} (map :cap) py-probes)]
+    (into [] (comp (remove (comp native :cap)) (map sh-via-python)) probes)))
+
 (defn judge
   "Verdict of one probe run. A run that never happened proves nothing."
   [{:keys [expect]} {:keys [out error]}]
@@ -220,9 +251,11 @@
                       (run-evidence runtime-id probe (run! (:script probe)))))))
 
 (def catalog
-  "Every built-in probe, sh then python: what grammar.core's :core module
-  composes. discover! keeps the ones written in the runtime's language."
-  (into probes py-probes))
+  "Every built-in probe: the sh probes, then the python ones, then the sh
+  probes lifted into python (py-sh-probes). What grammar.core's :core
+  module composes. discover! keeps the ones written in the runtime's
+  language."
+  (-> probes (into py-probes) (into py-sh-probes)))
 
 (defn for-lang
   "The probes of ps whose script is written in lang, in order."

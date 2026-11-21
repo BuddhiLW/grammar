@@ -118,9 +118,16 @@ Cap names are shared. Every python probe except `:interp/sh` is also lifted
 into an sh probe that runs the same script as `python3 -c '<script>'`, so
 `:py/pathlib` proved by a python runtime and `:py/pathlib` proved by a shell
 of the python3 it reaches are one law. `:interp/sh` has its own probe per
-language. A python runtime never probes the inner shell's grammar
-(`:sh/printf`, quoting), so delegating `:python` to `:sh` plans as
-`:blocked-on-unknown` there unless those are declared.
+language.
+
+The other way round, a python runtime also runs every sh probe whose cap
+has no python probe of its own (`grammar.probe/py-sh-probes`): the sh script
+goes through `subprocess.run(["sh","-c",script])`, the argv
+`:ctx/python->sh` runs, and its stdout is judged by the same `:expect`.
+These need `:py/subprocess` and `:interp/sh`, so `:sh/printf` and the
+quoting caps of a python runtime are the laws of the sh it reaches, and
+`:stack [:python :sh]` plans `:ok` on a python runtime with a working sh.
+Without subprocess or sh they are skipped and stay `:unknown`.
 
 A runtime whose top-level language has no probes (`:php`, `:perl`: their
 modules probe through sh) is refused by `discover!` with an ex-info naming
