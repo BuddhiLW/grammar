@@ -52,14 +52,16 @@ jobs:
           key: m2-${{ runner.os }}-${{ hashFiles('deps.edn') }}
           restore-keys: m2-${{ runner.os }}-
 
-      # The suite drives real bash, bash -r, dash, busybox sh and python3.
+      # The suite drives real bash, bash -r, dash, busybox sh, python3, php and perl.
       - name: Interpreters
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq busybox dash
+          sudo apt-get install -y -qq busybox dash php-cli perl
           for b in /usr/bin/bash /usr/bin/dash /usr/bin/busybox; do test -x "$b"; done
           python3 --version
+          php --version | head -n1
+          perl -e 'print "perl $^V\n"'
 
       # Gate BEFORE the bump: a published pom is immutable, so a red suite must
       # not be able to mint a version, tag it and ship it.

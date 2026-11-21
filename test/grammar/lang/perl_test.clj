@@ -123,19 +123,28 @@
   "gen-text with every CR LF pair split, so CR and LF both still occur."
   (gen/fmap #(str/replace % "\r\n" "\r \n") rtt/gen-text))
 
-(defspec perl-single-roundtrip 100 (prop/for-all [s gen-text-no-crlf] (perl-roundtrip? perl/perl-single s)))
+(def gen-ascii-no-crlf
+  "gen-text kept to ASCII, then with every CR LF pair split: the domain of
+  perl-single. Filtering first, so dropping a char cannot join a CR and an LF."
+  (gen/fmap #(-> (apply str (filter (fn [ch] (< (int ch) 128)) %))
+                 (str/replace "\r\n" "\r \n"))
+            rtt/gen-text))
+
+(defspec perl-single-roundtrip 100 (prop/for-all [s gen-ascii-no-crlf] (perl-roundtrip? perl/perl-single s)))
 
 (defspec perl-single-declines-exactly-nul-and-crlf 200
-  (prop/for-all [s (gen/one-of [rtt/gen-text rtt/gen-text-nul
+  ;; ... and non-ASCII: see perl-single.
+  (prop/for-all [s (gen/one-of [rtt/gen-text rtt/gen-text-nul gen-ascii-no-crlf
                                 (gen/fmap (fn [[a b]] (str a "\r\n" b)) (gen/tuple rtt/gen-text rtt/gen-text))])]
     (= (nil? (perl/perl-single s))
-       (or (str/includes? s "\u0000") (str/includes? s "\r\n")))))
+       (or (str/includes? s "\u0000") (str/includes? s "\r\n") (boolean (some #(< 127 (int %)) s))))))
 (defspec perl-double-roundtrip 100 (prop/for-all [s rtt/gen-text-nul] (perl-roundtrip? perl/perl-double s)))
 (defspec perl-chr-roundtrip 100 (prop/for-all [s rtt/gen-text-nul] (perl-roundtrip? perl/perl-chr s)))
 
 (deftest encoder-shapes
   (is (nil? (perl/perl-single "a\u0000b")) "an argv word cannot carry NUL")
   (is (nil? (perl/perl-single "a\r\nb")) "perl drops CR before LF in program text")
+  (is (nil? (perl/perl-single "café")) "raw UTF-8 source decodes under PERL5OPT=-Mutf8")
   (is (some? (perl/perl-single "a\rb\n\r")))
   (is (perl-roundtrip? perl/perl-double "a\r\nb\r\r\n"))
   (is (perl-roundtrip? perl/perl-chr "a\r\nb\r\r\n"))
@@ -163,7 +172,7 @@
          (= [:ctx/sh->perl str-id keep] (vec (take 3 (:realization res))))
          (true? (:ok? (g/verify [:str s] run))))))
 
-(defspec str-print-single-through-sh-perl 60 (prop/for-all [s gen-text-no-crlf] (str-via-perl? :pl.lit/single :pl.str/print s)))
+(defspec str-print-single-through-sh-perl 60 (prop/for-all [s gen-ascii-no-crlf] (str-via-perl? :pl.lit/single :pl.str/print s)))
 (defspec str-syswrite-double-through-sh-perl 60 (prop/for-all [s rtt/gen-text] (str-via-perl? :pl.lit/double :pl.str/syswrite s)))
 (defspec str-print-chr-through-sh-perl 60 (prop/for-all [s rtt/gen-text] (str-via-perl? :pl.lit/chr :pl.str/print s)))
 
@@ -252,7 +261,7 @@
     (testing "observed restrictions select the realization"
       (is (= :sh.write-file/redirect (first (via :dash-perl))) "sh redirect is cheapest when allowed")
       (is (= [:ctx/sh->perl :pl.write-file/open] (take 2 (via :rbash-perl))) "bash -r refuses >, perl present")
-      (is (= [:ctx/sh->perl :pl.write-file/open] (take 2 (via :rbash-both))) "equal cost, ids order perl before python")
+      (is (= [:ctx/sh->python :py.write-file/pathlib] (take 2 (via :rbash-both))) "both present: python3 costs less, perl is the fallback")
       (is (= [:ctx/sh->python :py.write-file/pathlib] (take 2 (via :rbash-python))) "perl absent: python"))
 
     (testing "sysopen route when 3-arg open is declared unavailable"
@@ -313,3 +322,31 @@
     (is (not-any? #(str/includes? (:code res) %) ["'" "\""]))
     (is (true? (:ok? (:verified res))) (pr-str (:execution res)))
     (is (Arrays/equals (.getBytes (str content "\u0000") "UTF-8") ^bytes (file-bytes path)))))
+
+(deftest hostile-perl-environment
+  ;; The fixtures clear the environment. A real host may not: PERL_UNICODE
+  ;; puts :utf8 layers on the std handles and on opened files, and
+  ;; PERL5OPT=-Mutf8 makes perl decode UTF-8 source. Neither may change a byte.
+  (let [bin (bin-dir! [:sh :perl])
+        rt (rt/process-runtime {:id :pl-hostile :lang :sh :argv (fx/shells :dash)
+                                :env (assoc (env-for bin) "PERL_UNICODE" "SDA" "PERL5OPT" "-Mutf8")})
+        prof (discover rt)]
+    (testing "every perl probe still answers yes; the syswrite probe binmodes first"
+      (doseq [{:keys [cap]} perl/probes]
+        (is (= :yes (p/verdict prof cap)) (str cap))))
+    (testing ":str through sh -> perl, each perl :str realization"
+      (doseq [str-id [:pl.str/print :pl.str/syswrite]
+              s ["café" "λ\u0000🚀" "it's $x @y" ""]]
+        (let [env' (isolated-env prof :pl.lit/double str-id)
+              res (solve/solve env' :sh [:str s] {:stack [:sh :perl]})
+              run (rt/execute rt (:code res))]
+          (is (= :ok (:status res)) (pr-str str-id s))
+          (is (true? (:ok? (g/verify [:str s] run))) (pr-str str-id s (:err run))))))
+    (testing ":write-file through sh -> perl: open and sysopen"
+      (doseq [[label prof'] [["open" prof]
+                             ["sysopen" (p/declare-cap prof :pl/open-write :no "test: force sysopen")]]]
+        (let [path (str (fx/tmp-dir! "grammar-perl-hostile-") "/out.txt")
+              c "café λ\u0000🚀\r\n"
+              res (run-intent rt prof' [:write-file {:path path :content c}] {:stack [:sh :perl]})]
+          (is (= :ok (:status res)) label)
+          (is (true? (:ok? (:verified res))) (pr-str label (:execution res))))))))

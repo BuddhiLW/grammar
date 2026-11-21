@@ -234,8 +234,14 @@
 
     (testing "chr disabled: the no-quote encoder is out, quotes still work"
       (is (= :no (p/verdict (profs :php-no-chr) :php.fn/chr)))
-      (let [prof (p/declare-text (profs :php-no-chr) :forbid #{"'"} "test: no single quotes")]
-        (is (= :unsatisfiable (:status (plan prof [:write-file {:path "/tmp/x" :content "a"}]))))))
+      (let [intent [:write-file {:path (str out "/no-quote-control.txt") :content "it's"}]
+            forbid #(p/declare-text % :forbid #{"'"} "test: no single quotes")]
+        (testing "control: with chr available the same forbid is satisfied by :php.lit/chr"
+          (let [res (exec! (rts :php-open) (plan (forbid (profs :php-open)) intent))]
+            (is (= :ok (:status res)))
+            (is (some #{:php.lit/chr} (:realization res)))
+            (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+        (is (= :unsatisfiable (:status (plan (forbid (profs :php-no-chr)) intent))))))
 
     (testing "NUL content rides the chr encoder inside file_put_contents"
       (let [res (write :php-open (profs :php-open) "a\u0000b\n")]

@@ -63,12 +63,14 @@
 (defn- leaf-lit [encode] (fn [_ [_ s]] (c/leaf (encode s))))
 
 (defn- fopen-write
-  "Render fopen + writer + fclose; exit status 1 when any step fails."
+  "Render fopen + writer + fclose. Exit status 1 when any step fails or the
+  writer reports fewer bytes than the content holds: fwrite and fputs return
+  a short count, not false, on a partial write."
   [writer]
   (fn [env [_ {:keys [path content]}]]
     (c/combine (fn [p m x]
-                 (str "$h=fopen(" p "," m ");"
-                      "exit($h===false||" writer "($h," x ")===false||!fclose($h)?1:0);"))
+                 (str "$c=" x ";$h=fopen(" p "," m ");"
+                      "exit($h===false||" writer "($h,$c)!==strlen($c)||!fclose($h)?1:0);"))
                (lit-in env :php path) (lit-in env :php "wb") (lit-in env :php content))))
 
 (def realizations
@@ -82,9 +84,10 @@
 
    ;; ------------------------------------------------ :str
    {:id :php.str/fwrite :intent :str :lang :php :cost 1
-    :requires (fns "fwrite")
+    :requires (fns "fwrite" "strlen")
+    :doc "Exit status 1 unless every byte was written: fwrite returns a short count, not false, on a partial write."
     :render (fn [env [_ s]]
-              (c/combine #(str "fwrite(STDOUT," % ");") (lit-in env :php s)))}
+              (c/combine #(str "$c=" % ";exit(fwrite(STDOUT,$c)===strlen($c)?0:1);") (lit-in env :php s)))}
    {:id :php.str/echo :intent :str :lang :php :cost 2
     :requires #{}
     :doc "echo is a language construct: disable_functions cannot remove it."
@@ -94,15 +97,16 @@
    ;; ------------------------------------------------ :write-file
    {:id :php.write-file/put-contents :intent :write-file :lang :php :cost 1
     :requires (fns "file_put_contents")
+    :doc "file_put_contents returns false on a short write."
     :render (fn [env [_ {:keys [path content]}]]
               (c/combine (fn [p x] (str "exit(file_put_contents(" p "," x ")===false?1:0);"))
                          (lit-in env :php path) (lit-in env :php content)))}
    {:id :php.write-file/fopen-fwrite :intent :write-file :lang :php :cost 2
-    :requires (fns "fopen" "fwrite" "fclose")
+    :requires (fns "fopen" "fwrite" "fclose" "strlen")
     :doc "For runtimes that disable file_put_contents."
     :render (fopen-write "fwrite")}
    {:id :php.write-file/fopen-fputs :intent :write-file :lang :php :cost 3
-    :requires (fns "fopen" "fputs" "fclose")
+    :requires (fns "fopen" "fputs" "fclose" "strlen")
     :doc "fputs is an alias of fwrite that disable_functions treats as a separate function."
     :render (fopen-write "fputs")}])
 
@@ -116,21 +120,23 @@
              (lit-in env :php prog) (lit-in env :php flag) (lit-in env :php code)))
 
 (def wrappers
-  [{:id :ctx/sh->php :outer :sh :inner :php :cost 10
+  [{:id :ctx/sh->php :outer :sh :inner :php :cost 11
     :requires #{:interp/php}
+    :doc "Costs one more than :ctx/sh->python, so delegation prefers python3 by cost, not by id spelling."
     :render (fn [env code] (c/combine #(str "php -r " %) (lit-in env :sh code)))}
    {:id :ctx/php->php :outer :php :inner :php :cost 5
     :requires #{}
     :doc "eval is a language construct."
     :render (fn [env code] (c/combine #(str "eval(" % ");") (lit-in env :php code)))}
    {:id :ctx/php->sh :outer :php :inner :sh :cost 10
-    :requires (conj (fns "proc_open" "proc_close") :interp/sh)
+    :requires (conj (fns "proc_open" "proc_close") :php/proc-open-argv :interp/sh)
     :render (fn [env code] (proc-open env "sh" "-c" code))}
    {:id :ctx/php->python :outer :php :inner :python :cost 10
-    :requires (conj (fns "proc_open" "proc_close") :interp/python3)
+    :requires (conj (fns "proc_open" "proc_close") :php/proc-open-argv :interp/python3)
     :render (fn [env code] (proc-open env "python3" "-c" code))}
-   {:id :ctx/python->php :outer :python :inner :php :cost 10
+   {:id :ctx/python->php :outer :python :inner :php :cost 11
     :requires #{:py/subprocess :interp/php}
+    :doc "Costs one more than :ctx/python->sh, for the same reason as :ctx/sh->php."
     :render (fn [env code]
               (c/combine (fn [a b x] (str "import subprocess,sys;sys.exit(subprocess.call([" a "," b "," x "]))"))
                          (lit-in env :python "php") (lit-in env :python "-r") (lit-in env :python code)))}])
@@ -159,6 +165,18 @@
   (into [{:cap :interp/php :needs [:sh/single-quote]
           :script "php -r 'echo \"ok\";'" :expect "ok"}
          {:cap :php/first-class-callable :needs [:interp/php :sh/single-quote]
-          :script "php -r 'function f(){return \"ok\";}$g=f(...);echo $g();'" :expect "ok"}]
+          :script "php -r 'function f(){return \"ok\";}$g=f(...);echo $g();'" :expect "ok"}
+         {:cap :php/proc-open-argv :needs [:interp/php :sh/single-quote]
+          :doc "proc_open takes an argv array (no shell) from PHP 7.4 on; before, it returns null and proc_close(null) would exit 0."
+          :script "php -r 'echo PHP_VERSION_ID>=70400?\"ok\":\"no\";'" :expect "ok"}]
         (map fn-probe)
         functions))
+
+(def module
+  "PHP as a grammar.core language module. Its parts are vars, so reloading
+  this namespace is seen without reloading grammar.core. Its probes need
+  :sh/single-quote, so it goes after the core module."
+  {:id :php
+   :realizations #'realizations
+   :wrappers #'wrappers
+   :probes #'probes})

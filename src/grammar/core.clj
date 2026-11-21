@@ -11,7 +11,9 @@
   (:require [grammar.probe :as probe]
             [grammar.realize :as realize]
             [grammar.runtime :as rt]
-            [grammar.solve :as solve])
+            [grammar.solve :as solve]
+            [grammar.lang.perl :as perl]
+            [grammar.lang.php :as php])
   (:import [java.io File]
            [java.nio.file Files]
            [java.util Arrays]))
@@ -32,9 +34,9 @@
     {:id kw :realizations [...] :wrappers [...] :probes [...]}
 
   Probes run in module order, so a module's probes may need capabilities
-  that an earlier module proves. A language reached through sh needs
-  :sh/single-quote from :core, which is why :core comes first."
-  [core-module])
+  that an earlier module proves. PHP and Perl are reached through sh and
+  their probes need :sh/single-quote, which is why :core comes first."
+  [core-module php/module perl/module])
 
 (defn- duplicates [xs]
   (into [] (keep (fn [[x n]] (when (< 1 n) x))) (frequencies xs)))

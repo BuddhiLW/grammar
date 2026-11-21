@@ -1,5 +1,5 @@
 {:lib      io.github.buddhilw/grammar
- :minor    2
+ :minor    3
  :license  {:name "GPL-3.0-or-later" :url "https://www.gnu.org/licenses/gpl-3.0.html"}
  :scm-url  "https://github.com/BuddhiLW/grammar"
  :src-dirs ["src"]

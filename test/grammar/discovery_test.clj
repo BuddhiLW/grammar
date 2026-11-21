@@ -41,7 +41,7 @@
           (is (s/profile? prof))
 
           (testing "law 1 + 2: evidence matches verdict"
-            (doseq [{:keys [cap]} probe/probes]
+            (doseq [{:keys [cap]} (:probes (g/compose g/modules))]
               (let [ids (get-in prof [:caps cap :evidence])
                     ev (get-in prof [:evidence (first ids)])]
                 (testing (str cap)

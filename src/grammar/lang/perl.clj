@@ -36,14 +36,17 @@
 (defn- utf8-bytes [^String s] (map #(bit-and (int %) 0xff) (.getBytes s "UTF-8")))
 
 (defn perl-single
-  "Perl single-quoted literal. Nothing interpolates; only \\ and ' are
-  escaped. The text is the UTF-8 of s as raw source bytes, which perl
-  (without `use utf8`) reads as exactly those bytes. nil when s holds NUL
-  (program text travels as an argv word, which cannot carry one) or CR LF:
-  perl's lexer drops a CR before LF in program text, inside quotes too,
-  and a single-quoted string has no escape for CR."
+  "Perl single-quoted literal of ASCII text. Nothing interpolates; only \\
+  and ' are escaped. nil when s holds:
+  - NUL: program text travels as an argv word, which cannot carry one;
+  - CR LF: perl's lexer drops a CR before LF in program text, inside quotes
+    too, and a single-quoted string has no escape for CR;
+  - any non-ASCII char: raw UTF-8 source bytes are read as bytes only
+    without `use utf8`, and the environment can turn that on
+    (PERL5OPT=-Mutf8), which would decode them into one char each.
+    perl-double's \\x{hh} escapes stay bytes either way."
   [s]
-  (when-not (or (nul? s) (str/includes? s "\r\n"))
+  (when-not (or (nul? s) (str/includes? s "\r\n") (some #(< 127 (int %)) s))
     (str "'" (str/replace s #"[\\']" #(str "\\" %)) "'")))
 
 (defn perl-double
@@ -119,8 +122,9 @@
                          (lit-in env :perl path) (lit-in env :perl content)))}])
 
 (def wrappers
-  [{:id :ctx/sh->perl :outer :sh :inner :perl :cost 10
+  [{:id :ctx/sh->perl :outer :sh :inner :perl :cost 11
     :requires #{:interp/perl}
+    :doc "Costs one more than :ctx/sh->python, so delegation prefers python3 by cost, not by id spelling."
     :render (fn [env code] (c/combine #(str "perl -e " %) (lit-in env :sh code)))}
    {:id :ctx/perl->sh :outer :perl :inner :sh :cost 10
     :requires #{:pl/system :interp/sh}
@@ -144,7 +148,7 @@
    {:cap :pl/print       :needs [:interp/perl :sh/single-quote]
     :script "perl -e 'print(STDOUT q(ok)) or exit(1);close(STDOUT) or exit(1)'" :expect "ok"}
    {:cap :pl/syswrite    :needs [:interp/perl :sh/single-quote]
-    :script "perl -e 'syswrite(STDOUT,q(ok))==2 or exit(1)'" :expect "ok"}
+    :script "perl -e 'binmode(STDOUT) or exit(1);syswrite(STDOUT,q(ok))==2 or exit(1)'" :expect "ok"}
    {:cap :pl/open-write  :needs [:interp/perl :sh/single-quote]
     :script "perl -e 'open(my $f,q(>),q(/dev/null)) or exit(1);binmode($f);print({$f} q(x)) or exit(1);close($f) or exit(1);print(q(ok))'"
     :expect "ok"}
@@ -153,3 +157,12 @@
     :expect "ok"}
    {:cap :pl/system      :needs [:interp/perl :sh/single-quote]
     :script "perl -e 'exit(system($^X,q(-e),q(print(q(ok)))) == 0 ? 0 : 1)'" :expect "ok"}])
+
+(def module
+  "Perl as a grammar.core language module. Its parts are vars, so reloading
+  this namespace is seen without reloading grammar.core. Its probes need
+  :sh/single-quote, so it goes after the core module."
+  {:id :perl
+   :realizations #'realizations
+   :wrappers #'wrappers
+   :probes #'probes})
