@@ -48,11 +48,10 @@
         prof (core/discover! rt {:modules with-toy})
         opts {:modules with-toy :stack [:sh :toy]}]
     (testing "its probe runs after :core, which proves what it needs"
+      (is (contains? (:caps prof) :toy/printf))
       (is (= :yes (p/verdict prof :toy/printf))))
-    (testing "probe order is module order: before :core the probe is skipped, so the cap stays unknown"
-      (is (= :unknown (p/verdict (core/discover! rt {:modules [toy core/core-module]}) :toy/printf))))
     (testing "without the module the capability is never probed"
-      (is (= :unknown (p/verdict (core/discover! rt) :toy/printf))))
+      (is (not (contains? (:caps (core/discover! rt)) :toy/printf))))
     (testing "an open Lang: a Result whose stack holds :toy validates"
       (let [res (core/plan prof :sh [:str "x"] opts)]
         (is (= :ok (:status res)))
@@ -66,3 +65,23 @@
           (is (= :ok (:status res)) (pr-str s))
           (is (every? (set (:realization res)) [:ctx/sh->toy :toy.str/printf]) (pr-str (:realization res)))
           (is (true? (:ok? (:verified res))) (pr-str s (:execution res))))))))
+
+(defn- refusal [f]
+  (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(deftest misordered-or-malformed-modules-are-refused
+  (testing "a probe whose needs only a later module proves would be skipped forever"
+    (let [d (refusal #(core/compose [toy core/core-module]))]
+      (is (= [:toy :core] (:modules d)))
+      (is (some #{[:toy/printf :interp/sh]} (:unproved d)))))
+  (testing "not a sequence of modules: a lone module map, nil, a map with no :id"
+    (doseq [bad [toy nil [{:realizations []}]]]
+      (is (contains? (refusal #(core/compose bad)) :modules) (pr-str bad))))
+  (testing "an explicit nil does not fall back to the default"
+    (is (some? (refusal #(core/env (p/empty-profile :t) {:modules nil}))))))
+
+(deftest the-registry-is-read-at-call-time
+  (testing "core-module holds vars, so a redefined registry is seen without reloading core"
+    (with-redefs [realize/wrappers []]
+      (is (= [] (:wrappers (core/compose core/modules)))))
+    (is (= realize/wrappers (:wrappers (core/compose core/modules))))))
