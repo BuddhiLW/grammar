@@ -206,8 +206,10 @@
 (defn- not-ok
   "The Result when the strict pass found nothing: :blocked-on-unknown when
   the relaxed pass (unknowns let through) finds a program, else
-  :unsatisfiable. strict is the strict pass's search result."
-  [env base gen rows text budget strict]
+  :unsatisfiable. plan holds the Result so far (:base), the candidate
+  generator (:gen), the explanation rows, the profile's text constraints,
+  the budget, and the strict pass's search result (:strict)."
+  [env {:keys [base gen rows text budget strict]}]
   (let [profile (:profile env)
         text-ev (vec (:evidence text))
         relaxed (run-pass (assoc env :admit #(p/not-refuted? profile %)) gen text budget)
@@ -263,4 +265,4 @@
                                 :text (select-keys text [:max-len :forbid])
                                 :bytes (utf8-len (:code found))}
                   :evidence (into (p/evidence-for profile (:requires found)) (vec (:evidence text))))
-           (not-ok env base gen rows text budget strict)))))))
+           (not-ok env {:base base :gen gen :rows rows :text text :budget budget :strict strict})))))))
