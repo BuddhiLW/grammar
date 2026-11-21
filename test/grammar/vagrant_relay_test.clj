@@ -4,7 +4,9 @@
 (ns grammar.vagrant-relay-test
   "host -> vm1 -> vm2 -> vm3 over real VirtualBox VMs (test/lab/vagrant),
   gated on GRAMMAR_VAGRANT=1 and GRAMMAR_VAGRANT_KEY (the private key the
-  lab was provisioned with). The VMs are brought up and destroyed outside
+  lab was provisioned with; GRAMMAR_VAGRANT_VM1_HOST/PORT point at vm1
+  when the host-only network is not routable from the host, e.g. the NAT
+  forward 127.0.0.1:2200). The VMs are brought up and destroyed outside
   the suite: `vagrant up` takes minutes.
 
   The solver plans every chain itself from discovered profiles, :target
@@ -36,7 +38,11 @@
      (.deleteOnExit f)
      (spit f (str/join "\n" ["Host *" (str "  IdentityFile " k) "  IdentitiesOnly yes"
                              "  UserKnownHostsFile /dev/null" "  StrictHostKeyChecking no" "  LogLevel ERROR"
-                             "  ConnectTimeout 15" "Host vm1" "  HostName 192.168.56.211" "  User relay" ""]))
+                             "  ConnectTimeout 15"
+                             "Host vm1" (str "  HostName " (or (System/getenv "GRAMMAR_VAGRANT_VM1_HOST") "192.168.56.211"))
+                             (str "  Port " (or (System/getenv "GRAMMAR_VAGRANT_VM1_PORT") "22")) "  User relay"
+                             "  ControlMaster auto" (str "  ControlPath " (System/getProperty "java.io.tmpdir") "/gvl-%C")
+                             "  ControlPersist 120" ""]))
      (str f))))
 
 (def chains

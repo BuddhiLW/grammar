@@ -24,7 +24,7 @@ USERS = <<~SH
   set -eu
   mk() { u=$1; sh_=$2
     id "$u" >/dev/null 2>&1 || { if command -v adduser >/dev/null && [ -f /etc/alpine-release ]; then adduser -D -s "$sh_" "$u"; else useradd -m -s "$sh_" "$u"; fi; }
-    sed -i "s#^$u:!:#$u:*:#" /etc/shadow
+    passwd -u "$u" >/dev/null 2>&1 || usermod -p '*' "$u" 2>/dev/null || true
     d=/home/$u/.ssh; mkdir -p $d
     printf '%s\\n' "$PUB" > $d/authorized_keys
     printf '%s\\n' "$PRIV" | base64 -d > $d/id_ed25519
@@ -59,11 +59,11 @@ Vagrant.configure("2") do |config|
         vb.cpus = 1
         vb.linked_clone = true
       end
-      hosts = NODES.map { |h, m| "#{m[:ip]} #{h}" }.join("\n")
+      hosts = NODES.map { |h, m| "#{m[:ip]} #{h}" }.join(" ")
       c.vm.provision "shell", env: { "PUB" => pub, "PRIV" => priv }, inline: <<~SH
         set -eu
         #{n[:pkgs]}
-        grep -q ' vm1$' /etc/hosts || printf '%s\\n' '#{hosts}' >> /etc/hosts
+        set -- #{hosts}; while [ $# -ge 2 ]; do grep -q " $2$" /etc/hosts || echo "$1 $2" >> /etc/hosts; shift 2; done
         #{USERS}
         #{n[:users]}
         mkdir -p /etc/sudoers.d
