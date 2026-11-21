@@ -39,7 +39,14 @@
   their probes need :sh/single-quote, which is why :core comes first.
   A probe may carry :lang (default :sh), the language its script is
   written in; discover! runs only the probes in the runtime's language.
-  :core writes probes in :sh and :python; PHP and Perl only in :sh."
+  :core writes probes in :sh and :python; PHP and Perl only in :sh.
+
+  Every realization and wrapper keeps the length law (grammar.law): its
+  output is never shorter, in UTF-8 bytes, than what it encodes or embeds,
+  because the planner prunes on :max-len by it. An entry that cannot keep
+  it (compression, a short alias) declares :shortens? true, which turns
+  that pruning off beneath it. A module author checks a registry with
+  grammar.law/length-law-violations from a property test."
   [core-module php/module perl/module])
 
 (defn- duplicates [xs]

@@ -23,8 +23,9 @@
   Length law: no output is shorter, in UTF-8 bytes, than the text an
   encoder encodes or than any piece a realization or wrapper embeds. The
   solver relies on it to drop a candidate already over the profile's
-  :max-len together with everything that would be built from it
-  (grammar.length-law-test checks it over this registry)."
+  :max-len together with everything that would be built from it. It is
+  grammar.law/length-law-violations, checked over this registry by
+  grammar.length-law-test; an entry that breaks it declares :shortens?."
   (:require [grammar.candidate :as c]
             [grammar.lit :as lit]
             [clojure.string :as str]))

@@ -6,12 +6,14 @@
   shorter than the text it encodes, and no realization or wrapper output is
   shorter than any piece it embeds. So a candidate already over :max-len
   stays over it in every program built from it."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [clojure.test :refer [deftest is testing]]
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
             [grammar.candidate :as c]
             [grammar.core :as g]
+            [grammar.law :as law]
+            [grammar.profile :as p]
             [grammar.solve :as solve]))
 
 (def registry (g/compose g/modules))
@@ -64,5 +66,34 @@
   (is (seq (:wrappers registry)))
   (is (= (set (map :intent (:realizations registry)))
          #{:lit :str :write-file :run :ensure-dir :remove-file :http-get})
-      "intent-for knows every intent the registry realizes")
-  (is (some? (c/leaf "x"))))
+      "intent-for knows every intent the registry realizes"))
+
+(defspec the-registry-keeps-the-exported-law 100
+  (prop/for-all [s gen-text piece (gen/fmap #(apply str "P" %) gen-text)]
+    (empty? (law/length-law-violations registry intent-for s piece))))
+
+(def ^:private shortener
+  "A wrapper that drops the code it is given: it breaks the length law."
+  {:id :ctx/drop :outer :sh :inner :python :cost 1 :requires #{}
+   :render (fn [_ _] (c/leaf "x"))})
+
+(deftest the-law-check-catches-a-shortener-and-honours-the-opt-out
+  (is (= [{:id :ctx/drop :code "x"}]
+         (law/length-law-violations {:wrappers [shortener]} intent-for "abc" "Pabc")))
+  (is (empty? (law/length-law-violations {:wrappers [(assoc shortener :shortens? true)]}
+                                         intent-for "abc" "Pabc"))))
+
+(deftest shortens-turns-pruning-off-beneath-it
+  (let [sh-lit {:id :t.lit/sh :intent :lit :lang :sh :cost 1 :requires #{}
+                :render (fn [_ [_ s]] (c/leaf (str "'" s "'")))}
+        py-str {:id :t.str/py :intent :str :lang :python :cost 1 :requires #{}
+                :render (fn [_ [_ s]] (c/leaf (str "print('" s "')")))}
+        prof (p/declare-text (p/empty-profile :t) :max-len 3 "test")
+        plan (fn [w] (solve/solve (solve/make-env prof {:realizations [sh-lit py-str] :wrappers [w]})
+                                  :sh [:str "a long text"]))]
+    (testing "without the opt-out the long inner program is pruned and nothing fits"
+      (is (= :unsatisfiable (:status (plan shortener)))))
+    (testing "with :shortens? the inner program survives and the wrapper's short output fits"
+      (let [res (plan (assoc shortener :shortens? true))]
+        (is (= :ok (:status res)))
+        (is (= "x" (:code res)))))))
