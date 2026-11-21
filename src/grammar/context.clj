@@ -31,6 +31,8 @@
   (:require [clojure.string :as str]
             [grammar.candidate :as c]
             [grammar.lit :as lit]
+            [grammar.probe :as probe]
+            [grammar.profile :as p]
             [grammar.runtime :as rt]))
 
 (defn- lit-in [env lang s] ((:lit env) lang s))
@@ -94,6 +96,13 @@
                       (lit-in env :sh (lit/printf-format code))
                       (map #(lit-in env :sh %) fixed)))}))
 
+(defn chain
+  "Hops ws (outermost first) linked for the planner: each hop's :from is
+  the context of the one before it, the first starts at the root. The
+  planner then reaches the last hop's context only through all of them."
+  [ws]
+  (vec (map (fn [w from] (assoc w :from from)) ws (cons nil (map :context ws)))))
+
 (def default-lits
   "Literal encoders a hop renders with when no planner chose them: POSIX
   single quotes for sh, single-quoted str for python."
@@ -147,6 +156,37 @@
   "The runtime at the end of hops ws, outermost first, from root."
   [root ws]
   (reduce hop-runtime root ws))
+
+(defn probe-reach
+  "profile (of runtime rt, the near side of hop w) with w's reach cap
+  probed through rt. Skipped (:unknown) unless its needs are :yes."
+  [rt profile w]
+  (let [{:keys [needs] :as pr} (reach-probe w)
+        unproven (remove #(= :yes (p/verdict profile %)) needs)]
+    (p/add-evidence profile
+                    (if (seq unproven)
+                      (probe/skip-evidence (rt/runtime-id rt) pr profile unproven)
+                      (probe/run-evidence (rt/runtime-id rt) pr (rt/execute rt (:script pr)))))))
+
+(defn discover-chain!
+  "Profile root and every far side of the linked hops ws (see chain).
+  discover is (fn [runtime] profile), e.g. grammar.core/discover!. Each
+  near side also gets its hop's :reach/<route> cap. A hop whose reach is
+  not :yes is not crossed: its far side and everything behind it stay
+  without a profile, so the planner answers :unknown for them.
+  Returns {:root profile :profiles {context profile} :runtimes {context rt}}."
+  [discover root ws]
+  (loop [rt root prof (discover root) near nil hs ws acc {:profiles {} :runtimes {}}]
+    (let [store (fn [acc prof] (if near (assoc-in acc [:profiles near] prof) (assoc acc :root prof)))]
+      (if-let [w (first hs)]
+        (let [prof (probe-reach rt prof w)
+              reach (first (filter #(= "reach" (namespace %)) (:requires w)))
+              acc (store acc prof)]
+          (if (= :yes (p/verdict prof reach))
+            (let [far (hop-runtime rt w)]
+              (recur far (discover far) (:context w) (rest hs) (assoc-in acc [:runtimes (:context w)] far)))
+            acc))
+        (store acc prof)))))
 
 (def module
   "Relay hops as a grammar.core language module: no realizations, no fixed
