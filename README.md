@@ -150,6 +150,44 @@ clojure -M:test
 Runs against real `bash`, `bash -r`, `dash`, `busybox sh` and `python3`, with
 PATH cut down per runtime to a scratch bin dir.
 
+Gated real relay labs (offline by default):
+
+```sh
+docker build -t grammar-relay-lab:1 test/lab/sshd
+GRAMMAR_SSHD=1 clojure -M:test -n grammar.ssh-relay-test
+
+# three VirtualBox VMs; the key is the one passed to vagrant up
+(cd test/lab/vagrant && LAB_PUBKEY="$(cat k.pub)" LAB_PRIVKEY="$(base64 -w0 k)" vagrant up)
+GRAMMAR_VAGRANT=1 GRAMMAR_VAGRANT_KEY=$PWD/k clojure -M:test -n grammar.vagrant-relay-test
+(cd test/lab/vagrant && vagrant destroy -f)
+```
+
+## Relay hops
+
+A hop (`grammar.context`) runs the inner program somewhere else: `env -i`,
+`sudo -n -- sh -c`, `ssh -- DEST W`, `ssh -J J1,J2 -- DEST W`, or
+`printf FMT | ssh -- DEST sh`. Each re-parses the text its own way:
+
+| hop   | parses of the inner program                                  |
+|-------|--------------------------------------------------------------|
+| env, sudo | outer sh (one quoted word), then `sh -c`; env/sudo exec argv |
+| ssh   | outer sh, then ssh JOINS its argv with spaces and the remote LOGIN shell parses the result |
+| -J    | as ssh: the jump hosts forward TCP and never parse           |
+| stdin | outer sh parses an octal-ASCII printf FORMAT; the login shell parses only the word `sh`; sh reads the program from stdin |
+
+A hop carries `:context`; inside it the solver plans against
+`(get profiles context)`, the profile `discover-chain!` probed THROUGH the
+hop (a `StackedRuntime`), and a context with no profile answers `:unknown`.
+`:target` names where the leaf must run. The direct ssh hops need
+`:sh/posix-words` of their far side, which a csh or fish login refutes;
+the stdin hop reaches those shells anyway.
+
+`grammar.parse.sh` / `grammar.parse.relay` are a pure oracle of these
+parsers (POSIX sh, bash, fish, csh word splitting and quote removal, ssh's
+join, sudo/env exec, python -c). Property tests check that N encodings
+through it are identity for arbitrary bytes, and that the oracle agrees
+with real dash, busybox ash and bash wherever it accepts a text.
+
 ## Release
 
 Built and published with [hive-build](https://clojars.org/io.github.hive-agi/hive-build)
