@@ -58,8 +58,11 @@
 (defspec wrappers-never-shorten-what-they-embed 100
   (prop/for-all [code gen-text piece (gen/fmap #(apply str "P" %) gen-text)]
     (every? (fn [w]
-              (every? #(<= (solve/utf8-len piece) (solve/utf8-len (:code %)))
-                      ((:render w) (piece-env piece) code)))
+              (and (every? #(<= (solve/utf8-len piece) (solve/utf8-len (:code %)))
+                           ((:render w) (piece-env piece) code))
+                   (every? #(<= (solve/utf8-len code) (solve/utf8-len (:code %)))
+                           ((:render w) {:lit (fn [_ t] [{:code t :via [] :requires #{} :stack [] :cost 0 :key []}])}
+                            code))))
             (:wrappers registry))))
 
 (deftest every-part-of-the-registry-is-covered

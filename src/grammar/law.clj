@@ -24,11 +24,17 @@
   [piece]
   {:lit (fn [_ _] [{:code piece :via [] :requires #{} :stack [] :cost 0 :key []}])})
 
+(def ^:private identity-env
+  "A render env whose every literal is its own text, as if quoted for free:
+  what a wrapper then outputs must still be as long as its inner code."
+  {:lit (fn [_ text] [{:code text :via [] :requires #{} :stack [] :cost 0 :key []}])})
+
 (defn- shorter
   "The outputs of entry x's :render, called on arg with an env whose every
-  literal is piece, that are shorter than floor bytes, as {:id :code}."
+  literal is piece (or, piece nil, its own text), that are shorter than
+  floor bytes, as {:id :code}."
   [x piece floor arg]
-  (for [cand ((:render x) (piece-env piece) arg)
+  (for [cand ((:render x) (if piece (piece-env piece) identity-env) arg)
         :when (< (utf8-len (:code cand)) floor)]
     {:id (:id x) :code (:code cand)}))
 
@@ -37,7 +43,9 @@
   ({:realizations [...] :wrappers [...]}, a composed module set) for one
   sample: text s for encoders, intent-of (fn [intent-kw s] intent) for
   other realizations, s as the inner code for wrappers, and piece as what
-  every literal they ask for renders to. Entries declaring :shortens? are
+  every literal they ask for renders to. A wrapper's output is held to the
+  longer of piece and its inner code s: pruning drops an inner candidate by
+  its own length, before the wrapper encodes it. Entries declaring :shortens? are
   skipped. Empty when the law holds for this sample."
   [{:keys [realizations wrappers]} intent-of s piece]
   (let [keeps (remove :shortens? realizations)]
@@ -49,5 +57,6 @@
                 v (shorter r piece (utf8-len piece) (intent-of (:intent r) s))]
             v)
           (for [w (remove :shortens? wrappers)
-                v (shorter w piece (utf8-len piece) s)]
+                v (distinct (concat (shorter w piece (utf8-len piece) s)
+                                    (shorter w nil (utf8-len s) s)))]
             v)))))

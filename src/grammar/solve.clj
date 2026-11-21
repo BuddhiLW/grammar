@@ -17,6 +17,7 @@
   resolving them would unlock (:blocked-on-unknown)."
   (:require [clojure.string :as str]
             [grammar.candidate :as c]
+            [grammar.law :as law]
             [grammar.profile :as p]
             [grammar.schema :as s]))
 
@@ -73,7 +74,6 @@
   (let [env (beneath env x)]
     {:lit (fn [lang text] (candidates env visited lang [:lit text]))}))
 
-(declare utf8-len)
 
 (defn- meter
   "The work account of one search pass: candidates examined (:spent),
@@ -104,7 +104,7 @@
      (empty? cands) nil
      (some-> m spent?) (do (vswap! m assoc :cut true) nil)
      :else (let [cand (first cands)
-                 len (utf8-len (:code cand))]
+                 len (law/utf8-len (:code cand))]
              (if (<= len n)
                (cons cand (prune-seq m n (rest cands)))
                (do (some-> m (charge-prune! len))
@@ -184,7 +184,9 @@
 
 ;; ---------------------------------------------------------------- text constraints
 
-(defn utf8-len [^String s] (alength (.getBytes s "UTF-8")))
+(def utf8-len
+  "Length of a string in UTF-8 bytes (grammar.law/utf8-len)."
+  law/utf8-len)
 
 (defn violations
   "Text constraints a program breaks. Empty vector when it satisfies them."
