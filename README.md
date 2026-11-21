@@ -175,18 +175,35 @@ A hop (`grammar.context`) runs the inner program somewhere else: `env -i`,
 | -J    | as ssh: the jump hosts forward TCP and never parse           |
 | stdin | outer sh parses an octal-ASCII printf FORMAT; the login shell parses only the word `sh`; sh reads the program from stdin |
 
-A hop carries `:context`; inside it the solver plans against
-`(get profiles context)`, the profile `discover-chain!` probed THROUGH the
-hop (a `StackedRuntime`), and a context with no profile answers `:unknown`.
-`:target` names where the leaf must run. The direct ssh hops need
-`:sh/posix-words` of their far side, which a csh or fish login refutes;
-the stdin hop reaches those shells anyway.
+`grammar.context/chain` links hops and gives each one a `:context` key
+naming its whole path from the root (`:hop/sh->ssh.n1>sh->sudo.root`), so
+a direct and a stdin hop to one host, or sudo behind two different hosts,
+never share a profile; `make-env` refuses two wrappers with one context.
+Inside a hop the solver plans against `(get profiles context)`, the
+profile `discover-chain!` probed THROUGH the hop (a `StackedRuntime`),
+and applies that profile's `:max-len` / `:forbid` to the inner program.
+A context with no profile answers `:unknown`. `:target` names where the
+leaf must run.
+
+A stacked runtime frames the far program between two markers, the close
+one carrying its exit status. A run with no frame (ssh exit 255, `sudo -n`
+refusing) is an `:error`, so a probe says `:unknown`, never `:no`; output
+before the frame (motd, rc files) comes back as `:noise`.
+
+The direct ssh hops need `:sh/posix-words` of their far side. Its probe
+text holds a newline, `!`, a double backslash and a backslash before a
+quote, so a csh or fish login refutes it; the stdin hop reaches those
+shells anyway. Single-quoted text grows about 4x per hop where it holds
+quotes; the planner does not yet weigh the 128 KB per-argument limit.
 
 `grammar.parse.sh` / `grammar.parse.relay` are a pure oracle of these
 parsers (POSIX sh, bash, fish, csh word splitting and quote removal, ssh's
 join, sudo/env exec, python -c). Property tests check that N encodings
-through it are identity for arbitrary bytes, and that the oracle agrees
-with real dash, busybox ash and bash wherever it accepts a text.
+through it are identity for arbitrary bytes; that raw payload bytes
+through chains with direct fish/csh hops are delivered exactly or the
+probe refutes every such hop; and that the oracle agrees with real dash,
+busybox ash and bash (and, with GRAMMAR_SSHD=1, fish and tcsh in the lab
+image) wherever it accepts a text, with an asserted acceptance rate.
 
 ## Release
 
