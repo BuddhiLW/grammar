@@ -98,17 +98,43 @@ absent). `discover!` runs only the probes in the runtime's language:
   and Perl modules' probes);
 - a `:python` runtime (`python3 -c`) runs `grammar.probe/py-probes`:
   `:py/sys`, `:py/stdout-buffer` (NUL, UTF-8 and CR LF through
-  `sys.stdout.buffer`), `:py/pathlib`, `:py/subprocess`, `:py/urllib`,
-  `:py.os/mkdir`, `:py.os/unlink`, and `:interp/sh` (subprocess runs
-  `["sh" "-c" ...]` with `sh` found on PATH).
+  `sys.stdout.buffer`), `:py/pathlib`, `:py/open-write` (write a file under
+  `$TMPDIR` and read it back), `:py.os/mkdir`, `:py.os/unlink` (make and
+  remove an entry there), `:py/subprocess` (run `sys.executable` as a child
+  and read its stdout), `:py/urllib` (fetch from a server the probe listens
+  with on 127.0.0.1), and `:interp/sh` (subprocess runs `["sh" "-c" ...]`
+  with `sh` found on PATH; with PATH unset python searches `os.defpath`,
+  exactly as `:ctx/python->sh` does).
+
+Each python probe performs the operation it proves, never only an import,
+so a runtime restricted by an audit hook (a `sitecustomize` raising on
+`subprocess.Popen`, `socket`, a write-mode `open`, ...) answers `:no`, with
+the refusal on the evidence's stderr. `:py.str/stdout` and
+`:py.http-get/urllib` require `:py/stdout-buffer`, and
+`:py.write-file/pathlib` requires `:py/open-write`: a declared profile that
+holds only `:py/sys` or `:py/pathlib` now plans them as `:blocked-on-unknown`.
 
 Cap names are shared. Every python probe except `:interp/sh` is also lifted
 into an sh probe that runs the same script as `python3 -c '<script>'`, so
 `:py/pathlib` proved by a python runtime and `:py/pathlib` proved by a shell
 of the python3 it reaches are one law. `:interp/sh` has its own probe per
-language. A python runtime never probes the inner shell's grammar
-(`:sh/printf`, quoting), so delegating `:python` to `:sh` plans as
-`:blocked-on-unknown` there unless those are declared.
+language.
+
+The other way round, a python runtime also runs every sh probe whose cap
+has no python probe of its own (`grammar.probe/py-sh-probes`): the sh script
+goes through `subprocess.run(["sh","-c",script])`, the argv
+`:ctx/python->sh` runs, and its stdout is judged by the same `:expect`.
+These need `:py/subprocess` and `:interp/sh`, so `:sh/printf` and the
+quoting caps of a python runtime are the laws of the sh it reaches, and
+`:stack [:python :sh]` plans `:ok` on a python runtime with a working sh.
+Without subprocess or sh they are skipped and stay `:unknown`. The on-demand
+`:sh.cmd/<prog>` probe is lifted the same way, so `:run`, `:ensure-dir` and
+`:remove-file` under `[:python :sh]` resolve the commands they need. Not
+lifted: `:bin/<prog>` (exec on PATH, which a shell running an applet does not
+show; a python runtime answers it with `shutil.which`) and `:interp/python3`
+(the python3 an inner sh finds is another interpreter than the runtime's).
+Argv crosses into subprocess as UTF-8 bytes, so an ASCII locale
+(`LC_ALL=C`, `PYTHONUTF8=0`) cannot refuse non-ASCII text.
 
 A runtime whose top-level language has no probes (`:php`, `:perl`: their
 modules probe through sh) is refused by `discover!` with an ex-info naming

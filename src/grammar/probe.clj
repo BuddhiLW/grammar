@@ -23,52 +23,115 @@
   [probe]
   (:lang probe :sh))
 
-(def os-functions
-  "The os functions the python realizations reach: pathlib's mkdir calls
-  os.mkdir, its unlink calls os.unlink. Each has a fixed :py.os/<f> probe."
-  ["mkdir" "unlink"])
+(defn- py-lines
+  "One python program from its lines."
+  [& lines]
+  (str/join "\n" lines))
 
-(defn- os-fn-probe [f]
-  {:cap (keyword "py.os" f) :lang :python :needs [:py/sys]
-   :script (str "import os,sys;sys.stdout.write(\"ok\" if callable(getattr(os," (lit/py-double f)
-                ",None)) else \"no\")")
-   :expect "ok"})
+(def ^:private py-scratch
+  "python statement binding p to a fresh path under $TMPDIR (else /tmp),
+  named by pid and random bytes. tempfile is not used on purpose: its
+  gettempdir writes a test file, so a runtime that refuses writes would
+  refute mkdir too."
+  (str "p=pathlib.Path(os.environ.get(\"TMPDIR\") or \"/tmp\","
+       "\"grammar-probe-%d-%s\"%(os.getpid(),os.urandom(4).hex()))"))
+
+(defn- with-cleanup
+  "python lines running body (lines), then always the cleanup statement:
+  a cleanup that raises is written to stderr, naming the path it left,
+  so the evidence shows what the probe could not remove. The verdict
+  stays the law's: a refused cleanup is not a refuted write."
+  [cleanup & body]
+  (concat ["try:"] (map #(str " " %) body)
+          ["finally:"
+           (str " try:" cleanup)
+           " except Exception as c:sys.stderr.write(\"cleanup failed, left %s: %r\\n\"%(p,c))"]))
+
+(defn- guarded
+  "python program that imports sys, then runs body (lines) after importing
+  modules. Anything raised in there (a missing module, an OSError, a
+  refusal from an audit hook) prints no, with the exception on stderr: the
+  program ran and the law was refuted. Only a program that never ran is
+  :unknown."
+  [modules & body]
+  (apply py-lines "import sys" "try:" (str " import " modules)
+         (concat (map #(str " " %) body)
+                 ["except Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")"])))
 
 (def py-probes
   "Probes written in python, for a runtime whose language is :python
   (python3 -c). Ordered like `probes`: every :needs is probed earlier in
-  this list. The scripts hold no single quote, so each one lifts into an sh
-  probe unchanged (see python-via-sh).
+  this list. A probe performs the operation its law is about, never just an
+  import: a runtime that refuses it (a missing module, an OSError, an audit
+  hook raising on subprocess, socket or a write-mode open) prints no. Each
+  script lifts into an sh probe (see python-via-sh).
 
     :py/sys            import sys and sys.stdout.write work
     :py/stdout-buffer  bytes written to sys.stdout.buffer arrive unchanged:
                        NUL, a two-byte UTF-8 sequence and CR LF included
     :py/pathlib        import pathlib
-    :py/subprocess     import subprocess
-    :py/urllib         import shutil, urllib.request
-    :py.os/<f>         os.<f> exists and is callable, for f in os-functions
+    :py/open-write     pathlib writes a file under $TMPDIR (else /tmp) and
+                       reads the same bytes back
+    :py.os/mkdir       pathlib.mkdir (os.mkdir) makes a directory there
+    :py.os/unlink      pathlib.unlink (os.unlink) removes a symlink made
+                       there, so it needs no write-mode open; a runtime that
+                       refuses os.symlink refutes it too
+    :py/subprocess     subprocess runs sys.executable as a child and reads
+                       its stdout
+    :py/urllib         urllib.request fetches a body from a server this
+                       script listens with on 127.0.0.1
     :interp/sh         subprocess runs [\"sh\" \"-c\" ...], sh found on PATH:
-                       the argv :ctx/python->sh runs. A /bin/sh off PATH does
-                       not count. Marked :lift false: sh runtimes prove
-                       :interp/sh with their own probe."
-  (-> [{:cap :py/sys :lang :python :needs []
-        :script "import sys;sys.stdout.write(\"ok\")" :expect "ok"}
-       {:cap :py/stdout-buffer :lang :python :needs []
-        :script "import sys;b=sys.stdout.buffer;b.write(bytes([111,0,195,169,13,10,107]));b.flush()"
-        :expect "o\u0000\u00e9\r\nk"}
-       {:cap :py/pathlib :lang :python :needs [:py/sys]
-        :script "import pathlib,sys;sys.stdout.write(\"ok\")" :expect "ok"}
-       {:cap :py/subprocess :lang :python :needs [:py/sys]
-        :script "import subprocess,sys;sys.stdout.write(\"ok\")" :expect "ok"}
-       {:cap :py/urllib :lang :python :needs [:py/sys]
-        :script "import shutil,sys,urllib.request;sys.stdout.write(\"ok\")" :expect "ok"}]
-      (into (map os-fn-probe) os-functions)
-      (conj {:cap :interp/sh :lang :python :lift false :needs [:py/sys :py/subprocess]
-             :script (str "import subprocess,sys\n"
-                          "try:o=subprocess.run([\"sh\",\"-c\",\"printf %s ok\"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE).stdout\n"
-                          "except OSError:o=b\"no\"\n"
-                          "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
-             :expect "ok"})))
+                       the argv :ctx/python->sh runs. With PATH set, a
+                       /bin/sh off PATH does not count; with PATH unset
+                       python searches os.defpath, as the wrapper does.
+                       Marked :lift false: sh runtimes prove :interp/sh with
+                       their own probe."
+  [{:cap :py/sys :lang :python :needs []
+    :script "import sys;sys.stdout.write(\"ok\")" :expect "ok"}
+   {:cap :py/stdout-buffer :lang :python :needs [:py/sys]
+    :script "import sys;b=sys.stdout.buffer;b.write(bytes([111,0,195,169,13,10,107]));b.flush()"
+    :expect "o\u0000\u00e9\r\nk"}
+   {:cap :py/pathlib :lang :python :needs [:py/sys]
+    :script "import pathlib,sys;sys.stdout.write(\"ok\")" :expect "ok"}
+   {:cap :py/open-write :lang :python :needs [:py/sys :py/pathlib]
+    :script (apply guarded "os,pathlib" py-scratch
+                   (with-cleanup "p.unlink(missing_ok=True)"
+                     "p.write_bytes(b\"ok\")" "sys.stdout.write(p.read_bytes().decode())"))
+    :expect "ok"}
+   {:cap :py.os/mkdir :lang :python :needs [:py/sys :py/pathlib]
+    :script (apply guarded "os,pathlib" py-scratch
+                   (with-cleanup "os.path.isdir(p) and p.rmdir()"
+                     "p.mkdir()" "sys.stdout.write(\"ok\" if p.is_dir() else \"no\")"))
+    :expect "ok"}
+   {:cap :py.os/unlink :lang :python :needs [:py/sys :py/pathlib]
+    :script (apply guarded "os,pathlib" py-scratch
+                   (with-cleanup "os.path.lexists(p) and p.unlink()"
+                     "os.symlink(\"grammar-probe-target\",p)" "p.unlink()"
+                     "sys.stdout.write(\"no\" if os.path.lexists(p) else \"ok\")"))
+    :expect "ok"}
+   {:cap :py/subprocess :lang :python :needs [:py/sys]
+    :script (guarded "subprocess"
+                     (str "o=subprocess.run([sys.executable,\"-c\",\"import sys;sys.stdout.write(sys.argv[1])\",\"ok\"],"
+                          "stdout=subprocess.PIPE).stdout")
+                     "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
+    :expect "ok"}
+   {:cap :py/urllib :lang :python :needs [:py/sys]
+    :script (guarded "shutil,socket,threading,urllib.request"
+                     "s=socket.socket();s.bind((\"127.0.0.1\",0));s.listen(1)"
+                     "def h():"
+                     " c=s.accept()[0];c.recv(65536)"
+                     " c.sendall(b\"HTTP/1.0 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok\");c.close()"
+                     "threading.Thread(target=h,daemon=True).start()"
+                     (str "r=urllib.request.build_opener(urllib.request.ProxyHandler({}))"
+                          ".open(\"http://127.0.0.1:%d/\"%s.getsockname()[1],timeout=5)")
+                     "sys.stdout.write(r.read().decode())")
+    :expect "ok"}
+   {:cap :interp/sh :lang :python :lift false :needs [:py/sys :py/subprocess]
+    :script (guarded "subprocess"
+                     (str "o=subprocess.run([\"sh\",\"-c\",\"printf %s ok\"],"
+                          "stdout=subprocess.PIPE).stdout")
+                     "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
+    :expect "ok"}])
 
 (defn- python-law?
   "True for a python probe whose law is about python itself, so that an sh
@@ -80,12 +143,15 @@
   "The sh probe for python probe pr: its script run by `python3 -c`, one
   single-quoted word, needing what pr needs plus :interp/python3 and
   :sh/single-quote. The cap is pr's own, so :py/pathlib proved here and
-  :py/pathlib proved by a python runtime state one law."
-  [{:keys [needs script] :as pr}]
-  (-> pr
-      (dissoc :lang :lift)
-      (assoc :needs (into [:interp/python3 :sh/single-quote] (remove #{:interp/python3 :sh/single-quote}) needs)
-             :script (str "python3 -c " (lit/sh-single script)))))
+  :py/pathlib proved by a python runtime state one law. Refuses, as
+  ex-info, a script no sh word can hold (NUL)."
+  [{:keys [cap needs script] :as pr}]
+  (let [word (or (lit/sh-single script)
+                 (throw (ex-info "a python probe script with NUL cannot be lifted into sh" {:cap cap})))]
+    (-> pr
+        (dissoc :lang :lift)
+        (assoc :needs (into [:interp/python3 :sh/single-quote] (remove #{:interp/python3 :sh/single-quote}) needs)
+               :script (str "python3 -c " word)))))
 
 (def probes
   "The sh probes: scripts for a runtime whose language is :sh. Ordered so
@@ -119,6 +185,57 @@
       (conj {:cap :sh.wget/gnu     :needs [:sh/printf :sh/single-quote]
              :doc "The wget the shell resolves is GNU Wget, which verifies TLS certificates. busybox wget rejects --version, so it prints no; so does a shell with no wget."
              :script "case $(wget --version) in 'GNU Wget'*) printf %s ok;; *) printf %s no;; esac" :expect "ok"})))
+
+(defn py-sh-argv
+  "python expression for the argv [sh -c script] as UTF-8 bytes, the argv
+  :ctx/python->sh hands to subprocess. Bytes, so no locale can refuse a
+  non-ASCII script."
+  [script]
+  (str "[b\"sh\",b\"-c\",(" (lit/py-double script) ").encode()]"))
+
+(defn sh-via-python
+  "The python probe for sh probe pr: its script run as
+  subprocess.run([\"sh\",\"-c\",script]), the argv :ctx/python->sh runs,
+  its stdout copied byte for byte and judged by the same :expect. It needs
+  what pr needs plus :py/sys, :py/stdout-buffer, :py/subprocess and
+  :interp/sh. The cap is pr's own: in a python runtime :sh/printf names
+  the law of the sh that python reaches, as :py/pathlib in an sh runtime
+  names the law of the python3 it reaches. Marked :lift false, so it is
+  never lifted back into sh."
+  [{:keys [needs script] :as pr}]
+  (assoc pr
+         :lang :python :lift false
+         :needs (into [:py/sys :py/stdout-buffer :py/subprocess :interp/sh]
+                      (remove #{:py/sys :py/stdout-buffer :py/subprocess :interp/sh}) needs)
+         :script (guarded "subprocess"
+                          (str "o=subprocess.run(" (py-sh-argv script) ",stdout=subprocess.PIPE).stdout")
+                          "sys.stdout.buffer.write(o);sys.stdout.buffer.flush()")))
+
+(defn- sh-law?
+  "True for an sh probe whose law is about the sh python reaches, so that
+  a python runtime can prove it through subprocess. Not lifted:
+  - a cap with a python probe of its own (the :py/ laws, :interp/sh);
+  - :bin/<prog>: its contract is that exec finds prog on PATH, which a
+    shell running prog does not show (a busybox applet is no file), so a
+    python runtime answers it with its own on-demand shutil.which probe;
+  - :interp/python3: the python3 an inner sh finds is another interpreter
+    than the runtime's, and a profile keeps one verdict per cap."
+  [native {:keys [cap]}]
+  (not (or (native cap)
+           (= "bin" (namespace cap))
+           (= :interp/python3 cap))))
+
+(def py-sh-probes
+  "The sh probes a python runtime runs through subprocess: every sh probe
+  whose law is about the sh it reaches (see sh-law?), lifted by
+  sh-via-python, in sh order. They follow py-probes, which proves the :py/
+  caps they need.
+
+  This is the probe-side half of a python->sh context layer: a general
+  stacked runtime that probes an inner language through a wrapper would
+  produce these by running the sh probes through :ctx/python->sh."
+  (let [native (into #{} (map :cap) py-probes)]
+    (into [] (comp (filter (partial sh-law? native)) (map sh-via-python)) probes)))
 
 (defn judge
   "Verdict of one probe run. A run that never happened proves nothing."
@@ -165,9 +282,11 @@
                       (run-evidence runtime-id probe (run! (:script probe)))))))
 
 (def catalog
-  "Every built-in probe, sh then python: what grammar.core's :core module
-  composes. discover! keeps the ones written in the runtime's language."
-  (into probes py-probes))
+  "Every built-in probe: the sh probes, then the python ones, then the sh
+  probes lifted into python (py-sh-probes). What grammar.core's :core
+  module composes. discover! keeps the ones written in the runtime's
+  language."
+  (-> probes (into py-probes) (into py-sh-probes)))
 
 (defn for-lang
   "The probes of ps whose script is written in lang, in order."
@@ -198,7 +317,9 @@
     :bin/<prog>     exec finds prog: an executable file on PATH (or prog
                     itself when it holds a slash). Builtins do not count.
     :sh.cmd/<prog>  the shell resolves the word prog (command -v): PATH,
-                    builtins and applets all count. sh runtimes only."
+                    builtins and applets all count. In a python runtime it
+                    is the sh probe lifted by sh-via-python: the law of the
+                    sh that python reaches."
   [lang cap]
   (let [prog (name cap)]
     (case [(namespace cap) lang]
@@ -214,6 +335,7 @@
                        {:cap cap :needs [:sh/printf :sh/single-quote]
                         :script (str "case $(command -v " q ") in '') printf %s no;; *) printf %s ok;; esac")
                         :expect "ok"})
+      ["sh.cmd" :python] (some-> (on-demand :sh cap) sh-via-python)
       nil)))
 
 (defn resolve-caps

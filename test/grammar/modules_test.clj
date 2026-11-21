@@ -80,10 +80,10 @@
       (is (some #{[:toy/printf :interp/sh]} (:unproved d)))))
   (testing "needs are proved per script language: a python probe cannot lean on an sh probe"
     (let [py-on-sh {:id :py-on-sh
-                    :probes [{:cap :toy/py :lang :python :needs [:sh/single-quote]
+                    :probes [{:cap :toy/py :lang :python :needs [:interp/php]
                               :script "print()" :expect "ok"}]}
-          d (refusal #(core/compose [core/core-module py-on-sh]))]
-      (is (= [[:toy/py :sh/single-quote]] (:unproved d)))))
+          d (refusal #(core/compose (conj core/modules py-on-sh)))]
+      (is (= [[:toy/py :interp/php]] (:unproved d)) ":interp/php is proved by an sh probe only")))
   (testing "one cap may have one probe per language, never two in one language"
     (let [twin {:id :twin :probes [{:cap :py/sys :lang :python :needs [] :script "x" :expect "ok"}]}
           d (refusal #(core/compose [core/core-module twin]))]

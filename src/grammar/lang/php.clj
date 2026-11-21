@@ -22,7 +22,8 @@
   `module` bundles the three for grammar.core/compose, and
   grammar.core/modules includes it by default."
   (:require [clojure.string :as str]
-            [grammar.candidate :as c]))
+            [grammar.candidate :as c]
+            [grammar.realize :as realize]))
 
 ;; ---------------------------------------------------------------- literal encoders
 
@@ -135,7 +136,7 @@
     :requires #{:py/subprocess :interp/php}
     :doc "Costs one more than :ctx/python->sh, for the same reason as :ctx/sh->php."
     :render (fn [env code]
-              (c/combine (fn [a b x] (str "import subprocess,sys;sys.exit(subprocess.call([" a "," b "," x "]))"))
+              (c/combine (fn [a b x] (str "import subprocess,sys;sys.exit(subprocess.call([" (str/join "," (map realize/py-bytes [a b x])) "]))"))
                          (lit-in env :python "php") (lit-in env :python "-r") (lit-in env :python code)))}])
 
 ;; ---------------------------------------------------------------- probes

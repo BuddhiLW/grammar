@@ -13,7 +13,12 @@
             [grammar.probe :as probe]
             [grammar.profile :as p]
             [grammar.runtime :as rt]
-            [grammar.schema :as s])
+            [grammar.schema :as s]
+            [grammar.lit :as lit]
+            [clojure.test.check.generators :as gen]
+            [hive-test.trifecta :refer [deftrifecta]]
+            [clojure.test.check.properties :as prop]
+            [clojure.test.check.clojure-test :refer [defspec]])
   (:import [java.io File]))
 
 (defn- site-dir!
@@ -29,26 +34,58 @@
   (rt/process-runtime {:id id :lang :python :argv [(fx/tools :python3) "-c"]
                        :env (merge {"PATH" (fx/bin-dir! tool-ks) "LC_ALL" "C.UTF-8"} extra-env)}))
 
+(defn audit-site
+  "sitecustomize source installing an audit hook that raises PermissionError
+  on every event in events (a prefix match) and, when writes? is true, on
+  every open whose flags ask to write. The e2e lab restricts python this
+  way; the import machinery tolerates an OSError, so the interpreter still
+  starts."
+  [events writes?]
+  (str "import os,sys\n"
+       "_B=(" (str/join "" (map #(str "\"" % "\",") events)) ")\n"
+       "_W=os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_APPEND|os.O_TRUNC\n"
+       "def _h(ev,a):\n"
+       " if ev.startswith(_B) or (" (if writes? "True" "False")
+       " and ev==\"open\" and len(a)>2 and isinstance(a[2],int) and a[2]&_W):\n"
+       "  raise PermissionError(\"audit: \"+ev)\n"
+       "sys.addaudithook(_h)\n"))
+
+(def lab-events
+  "What the e2e lab's hook refuses: spawning and the network."
+  ["subprocess.Popen" "os.system" "os.exec" "os.posix_spawn" "os.spawn" "os.fork"
+   "socket." "urllib.Request"])
+
+(defn- audited-rt!
+  [id events writes?]
+  (py-rt! id [:sh] {"PYTHONPATH" (site-dir! (audit-site events writes?))
+                    "PYTHONDONTWRITEBYTECODE" "1"}))
+
 (def ^:private rts
   (delay
     {:py-full (py-rt! :py-full [:sh] {})
      :py-nosub (py-rt! :py-nosub [:sh]
                        {"PYTHONPATH" (site-dir! "import sys\nsys.modules[\"subprocess\"]=None\n")})
-     :py-nosh (py-rt! :py-nosh [] {})}))
+     :py-nosh (py-rt! :py-nosh [] {})
+     :py-audit (audited-rt! :py-audit lab-events true)
+     :py-audit-fs (audited-rt! :py-audit-fs ["os.mkdir" "os.remove" "os.symlink"] false)}))
 
 (def ^:private profs (delay (update-vals @rts g/discover!)))
 
 (def py-caps (mapv :cap probe/py-probes))
 
+(def py-sh-caps
+  "The sh caps a python runtime probes through subprocess."
+  (mapv :cap probe/py-sh-probes))
+
 (deftest python-runtimes-run-python-probes
   (doseq [[id prof] @profs]
     (testing (str id)
       (is (s/profile? prof))
-      (testing "only python probes ran: no sh-only cap was probed"
-        (is (= (set py-caps) (set (keys (:caps prof)))))
-        (is (not (contains? (:caps prof) :sh/printf))))
+      (testing "only python probes ran: the python laws and the sh ones lifted through subprocess"
+        (is (= (set (concat py-caps py-sh-caps)) (set (keys (:caps prof)))))
+        (is (not (contains? (:caps prof) :interp/php)) "php and perl probe only through sh"))
       (testing "law 1 + 2: one evidence entry per cap, matching its verdict"
-        (doseq [cap py-caps]
+        (doseq [cap (concat py-caps py-sh-caps)]
           (let [ids (get-in prof [:caps cap :evidence])
                 ev (get-in prof [:evidence (first ids)])]
             (testing (str cap)
@@ -73,16 +110,54 @@
       (is (= :unknown (v py-nosub :interp/sh)))
       (is (str/includes? (str (:reason (ev py-nosub :py-nosub :interp/sh)))
                          "prerequisite not proven: :py/subprocess=no"))
-      (doseq [cap [:py/sys :py/stdout-buffer :py/pathlib :py/urllib :py.os/mkdir :py.os/unlink]]
+      (doseq [cap [:py/sys :py/stdout-buffer :py/pathlib :py/open-write :py/urllib :py.os/mkdir :py.os/unlink]]
         (is (= :yes (v py-nosub cap)) (str cap))))
     (testing "no sh on PATH: subprocess imports, but running sh is refuted"
       (is (= :yes (v py-nosh :py/subprocess)))
       (is (= :no (v py-nosh :interp/sh)))
       (is (= "no" (:out (ev py-nosh :py-nosh :interp/sh)))))))
 
+(deftest audit-hooks-are-detected
+  (let [{:keys [py-audit py-audit-fs]} @profs
+        v p/verdict
+        ev (fn [prof id cap] (get-in prof [:evidence (probe/evidence-id id cap)]))]
+    (testing "the lab's hook: spawning, sockets and write-mode open are refuted, with the refusal kept"
+      (doseq [[cap event] [[:py/subprocess "subprocess.Popen"] [:py/urllib "socket"] [:py/open-write "open"]]]
+        (is (= :no (v py-audit cap)) (str cap))
+        (is (str/includes? (str (:err (ev py-audit :py-audit cap))) (str "audit: " event)) (str cap)))
+      (is (= :unknown (v py-audit :interp/sh)) "sh is never tried once subprocess is refuted")
+      (doseq [cap [:py/sys :py/stdout-buffer :py/pathlib :py.os/mkdir :py.os/unlink]]
+        (is (= :yes (v py-audit cap)) (str cap))))
+    (testing "a hook on os.mkdir and os.remove: the fs caps are refuted, everything else holds"
+      (is (= :no (v py-audit-fs :py.os/mkdir)))
+      (is (= :no (v py-audit-fs :py.os/unlink)))
+      (doseq [cap [:py/open-write :py/subprocess :py/urllib :interp/sh]]
+        (is (= :yes (v py-audit-fs cap)) (str cap))))))
+
+(deftest audited-plans-refuse-or-reroute
+  (let [{:keys [py-audit py-audit-fs]} @profs
+        dir (fx/tmp-dir! "grammar-audit-")]
+    (testing ":str still runs: stdout needs no forbidden operation"
+      (let [res (g/realize! (:py-audit @rts) py-audit [:str "it's \u00e9"])]
+        (is (= :ok (:status res)))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "write-file, http-get, run and delegation to sh are refused, citing the refutation"
+      (doseq [[intent opts cap] [[[:write-file {:path (str dir "/w") :content "x"}] {} :py/open-write]
+                                 [[:http-get {:url "http://127.0.0.1:1/"}] {} :py/urllib]
+                                 [[:run {:argv ["true"]}] {} :py/subprocess]
+                                 [[:str "x"] {:stack [:python :sh]} :py/subprocess]]]
+        (let [res (g/plan py-audit :python intent opts)]
+          (is (= :unsatisfiable (:status res)) (pr-str intent (:needs res)))
+          (is (some #{(probe/evidence-id :py-audit cap)} (:evidence res)) (pr-str intent)))))
+    (testing "fs ops are refused where os.mkdir/os.remove are hooked, nothing runs"
+      (doseq [intent [[:ensure-dir {:path (str dir "/d")}] [:remove-file {:path (str dir "/f")}]]]
+        (let [res (g/realize! (:py-audit-fs @rts) py-audit-fs intent)]
+          (is (not= :ok (:status res)) (pr-str intent))
+          (is (nil? (:execution res))))))))
+
 (deftest str-and-write-file-plan-run-and-verify
   (let [out (fx/tmp-dir! "grammar-pyrt-")]
-    (doseq [[id runtime] @rts
+    (doseq [[id runtime] (select-keys @rts [:py-full :py-nosub :py-nosh])
             :let [prof (@profs id)]]
       (testing (str id)
         (doseq [s ["" "it's \"x\" $HOME `id` \\" "\u00fcn\u00ef\ncode\ttab" "nul\u0000byte"]]
@@ -102,19 +177,26 @@
 (deftest delegation-to-sh-follows-the-evidence
   (let [{:keys [py-full py-nosub py-nosh]} @profs
         sh-plan #(g/plan % :python [:str "x"] {:stack [:python :sh]})]
-    (testing "full: the wrapper is admitted; only the inner sh's grammar, never probed from python, blocks"
-      (let [res (sh-plan py-full)]
-        (is (= :blocked-on-unknown (:status res)))
-        (is (= :ctx/python->sh (first (:would-select res))))
-        (is (seq (:needs res)))
-        (is (every? #(= "sh" (namespace %)) (:needs res)) (pr-str (:needs res)))))
-    (testing "full: declaring the inner sh's grammar lets python->sh run for real"
-      (let [prof (reduce #(p/declare-cap %1 %2 :yes "test: the PATH sh is dash")
-                         py-full [:sh/printf :sh/single-quote])
-            res (g/realize! (:py-full @rts) prof [:str "via sh's printf"] {:stack [:python :sh]})]
-        (is (= :ok (:status res)))
-        (is (= :ctx/python->sh (first (:realization res))))
+    (testing "full: python probed the grammar of the sh it reaches, so python->sh plans and runs"
+      (let [res (g/realize! (:py-full @rts) py-full [:str "via sh's printf: it's \u00e9"] {:stack [:python :sh]})]
+        (is (= :ok (:status res)) (pr-str (:needs res)))
+        (is (= [:ctx/python->sh :sh.str/printf :sh.lit/single] (take 3 (:realization res))))
+        (is (= [:python :sh] (:stack res)))
+        (is (every? #(contains? (:evidence py-full) %) (:evidence res)))
+        (is (some #{(probe/evidence-id :py-full :sh/single-quote)} (:evidence res)))
         (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "full: the lifted sh verdicts are dash's, judged by the sh probes' own expect"
+      (is (= :yes (p/verdict py-full :sh/printf)))
+      (is (= :no (p/verdict py-full :sh/ansi-c-quote)) "dash has no $'...'")
+      (is (not (contains? (:caps py-full) :interp/python3))
+          "the python3 an inner sh finds is another interpreter: not lifted")
+      (is (not-any? #(= "bin" (namespace %)) (keys (:caps py-full)))
+          ":bin/ caps are answered on demand by shutil.which, never by a shell"))
+    (testing "the lifted sh probes are skipped where subprocess or sh is refuted"
+      (doseq [[prof id why] [[py-nosub :py-nosub ":py/subprocess=no"] [py-nosh :py-nosh ":interp/sh=no"]]
+              cap py-sh-caps]
+        (is (= :unknown (p/verdict prof cap)) (str id cap))
+        (is (str/includes? (str (get-in prof [:evidence (probe/evidence-id id cap) :reason])) why) (str id cap))))
     (testing "subprocess refuted: python->sh is unsatisfiable, the refutation is cited"
       (let [res (sh-plan py-nosub)]
         (is (= :unsatisfiable (:status res)))
@@ -134,12 +216,153 @@
           py-prof (:py-full @profs)]
       (doseq [cap (remove #{:interp/sh} py-caps)]
         (is (= :yes (p/verdict sh-prof cap) (p/verdict py-prof cap)) (str cap)))))
+  (testing "a python runtime proves the sh laws of the sh it reaches under the same names"
+    (let [sh-prof (g/discover! (fx/sh-runtime! :sh-shared :dash [:sh]))
+          py-prof (:py-full @profs)]
+      (doseq [cap py-sh-caps]
+        (is (= (p/verdict sh-prof cap) (p/verdict py-prof cap)) (str cap)))))
+  (testing "every lifted sh probe runs the sh script verbatim through subprocess, same expect"
+    (let [sh-ps (into {} (map (juxt :cap identity)) probe/probes)]
+      (doseq [{:keys [cap script expect needs]} probe/py-sh-probes]
+        (is (str/includes? script (probe/py-sh-argv (:script (sh-ps cap)))) (str cap))
+        (is (= (:expect (sh-ps cap)) expect) (str cap))
+        (is (every? (set needs) (concat [:py/subprocess :interp/sh] (:needs (sh-ps cap)))) (str cap)))))
   (testing "every python probe but :interp/sh is lifted into an sh probe running python3 -c"
     (let [sh-ps (into {} (map (juxt :cap identity)) probe/probes)]
       (doseq [{:keys [cap script needs lift]} probe/py-probes
               :when (not (false? lift))]
-        (is (= (str "python3 -c '" script "'") (:script (sh-ps cap))) (str cap))
+        (is (= (str "python3 -c " (lit/sh-single script)) (:script (sh-ps cap))) (str cap))
         (is (every? (set (:needs (sh-ps cap))) (conj needs :interp/python3)) (str cap))))))
+
+(def ^:private orig-sh-via-python probe/sh-via-python)
+
+(def ^:private gen-sh-probe
+  "An sh probe: printable ASCII script (quotes, backslashes, $ included), needs from a small pool."
+  (gen/let [script (gen/fmap str/join (gen/vector (gen/fmap char (gen/choose 32 126)) 0 20))
+            needs (gen/vector-distinct (gen/elements [:sh/printf :sh/single-quote :interp/sh :sh/pipe]))]
+    {:cap :sh/x :needs needs :script script :expect "ok"}))
+
+(deftrifecta sh-via-python
+  grammar.probe/sh-via-python
+  {:golden-path "test/golden/probe/sh-via-python.edn"
+   :cases {:printf (first probe/probes)
+           :quotes {:cap :sh/q :needs [:sh/printf] :script "printf %s \"o\"'k' \\ $HOME" :expect "ok"}
+           :overlap {:cap :sh/o :needs [:interp/sh :sh/printf] :script "sh -c 'printf %s ok'" :expect "ok"}}
+   :gen gen-sh-probe
+   :pred (fn [{:keys [lang lift needs script expect]}]
+           (and (= :python lang) (false? lift) (= "ok" expect)
+                (= [:py/sys :py/stdout-buffer :py/subprocess :interp/sh] (take 4 needs))
+                (= (count needs) (count (distinct needs)))
+                (str/includes? script "[b\"sh\",b\"-c\",")))
+   :mutations [["keeps-sh-lang" (fn [pr] (dissoc (orig-sh-via-python pr) :lang))]
+               ["liftable" (fn [pr] (dissoc (orig-sh-via-python pr) :lift))]
+               ["drops-inner-needs" (fn [pr] (assoc (orig-sh-via-python pr) :needs [:py/sys :py/stdout-buffer :py/subprocess :interp/sh]))]
+               ["no-interp-sh" (fn [pr] (update (orig-sh-via-python pr) :needs #(vec (remove #{:interp/sh} %))))]
+               ["unquoted" (fn [pr] (update (orig-sh-via-python pr) :script str/replace "\\\"" "\""))]]})
+
+(defn- busybox-sh-rt!
+  "python runtime whose PATH holds only sh, a link to busybox: tee and
+  printf are applets the shell runs, not files exec finds."
+  []
+  (let [d (fx/tmp-dir! "grammar-bbsh-")]
+    (java.nio.file.Files/createSymbolicLink (.toPath (File. ^String d "sh")) (.toPath (File. ^String (fx/tools :busybox)))
+                                            (make-array java.nio.file.attribute.FileAttribute 0))
+    (rt/process-runtime {:id :py-bbsh :lang :python :argv [(fx/tools :python3) "-c"]
+                         :env {"PATH" d "LC_ALL" "C.UTF-8"}})))
+
+(deftest bin-caps-follow-exec-not-the-shell
+  (let [r (busybox-sh-rt!)
+        prof (g/discover! r)
+        res (g/realize! r prof [:run {:argv ["tee" "/dev/null"]}] {:resolve true})
+        after (:profile-after res)
+        applets? (= :yes (p/verdict after :sh.cmd/tee))]
+    (is (= :yes (p/verdict prof :sh/pipe)) "the inner busybox sh pipes between builtins")
+    (is (= :unknown (p/verdict prof :bin/tee)) "no shell probe is lifted to answer for exec")
+    (is (= :no (p/verdict after :bin/tee)) "shutil.which finds no tee file on PATH")
+    ;; busybox-static's sh runs its applets with a PATH holding none of
+    ;; them; a dynamically linked busybox does not (see fs_ops_test). Follow
+    ;; the observed :sh.cmd/tee verdict.
+    (if applets?
+      (testing "so :py.run/subprocess is never planned: :run reroutes through sh, and runs"
+        (is (= :ok (:status res)))
+        (is (= [:ctx/python->sh :sh.run/words] (take 2 (:realization res))))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res))))
+      (testing "no tee anywhere: :run of tee is refused, nothing runs"
+        (is (not= :ok (:status res)))
+        (is (nil? (:execution res)))))))
+
+(deftest quote-forbidding-policies-still-plan-python
+  (let [r (:py-full @rts)
+        prof (g/resolve! r (:py-full @profs) [:bin/sh])
+        dir (fx/tmp-dir! "grammar-noquote-")]
+    (doseq [forbid [#{"\""} #{"'" "\""}]
+            :let [pol (p/declare-text prof :forbid forbid "test: no quotes")]
+            [intent opts] [[[:write-file {:path (str dir "/w caf\u00e9") :content "it's \"x\""}] {}]
+                           [[:ensure-dir {:path (str dir "/d\u00e9")}] {}]
+                           [[:remove-file {:path (str dir "/w caf\u00e9")}] {}]
+                           [[:run {:argv ["sh" "-c" "test \"$1\" = 'a b'" "x" "a b"]}] {}]
+                           [[:str "caf\u00e9 'q' \"d\""] {}]
+                           [[:str "caf\u00e9 'q' \"d\""] {:stack [:python :sh]}]]]
+      (testing (pr-str forbid intent opts)
+        (let [res (g/realize! r pol intent opts)]
+          (is (= :ok (:status res)) (pr-str (:rejected res)))
+          (is (not-any? #(str/includes? (str (:code res)) %) forbid))
+          (is (true? (:ok? (:verified res))) (pr-str (:execution res))))))))
+
+(deftest fs-probes-clean-up-and-ignore-proxies
+  (let [tmp (fx/tmp-dir! "grammar-probe-tmp-")
+        r (py-rt! :py-proxy [:sh] {"TMPDIR" tmp "http_proxy" "http://127.0.0.1:9/"
+                                   "HTTP_PROXY" "http://127.0.0.1:9/" "no_proxy" ""})
+        prof (g/discover! r)]
+    (doseq [cap [:py/open-write :py.os/mkdir :py.os/unlink :py/urllib]]
+      (is (= :yes (p/verdict prof cap)) (str cap (pr-str (get-in prof [:evidence (probe/evidence-id :py-proxy cap)])))))
+    (is (empty? (.list (File. ^String tmp))) "every probe removed what it made under TMPDIR"))
+  (testing "a cleanup the runtime refuses is kept as evidence, the verdict stays the law's"
+    (let [tmp (fx/tmp-dir! "grammar-probe-tmp-")
+          r (py-rt! :py-nounlink [:sh] {"TMPDIR" tmp
+                                        "PYTHONPATH" (site-dir! (audit-site ["os.remove"] false))})
+          prof (g/discover! r)
+          ev (get-in prof [:evidence (probe/evidence-id :py-nounlink :py/open-write)])]
+      (is (= :yes (p/verdict prof :py/open-write)))
+      (is (str/includes? (str (:err ev)) "cleanup failed, left") (pr-str ev)))))
+
+(deftest sh-commands-resolve-through-python
+  (let [r (py-rt! :py-shcmd [:sh :mkdir] {})
+        prof (g/discover! r)
+        d (str (fx/tmp-dir! "grammar-shcmd-") "/it's dir/c")]
+    (testing ":sh.cmd/mkdir is probed through subprocess and the sh plan runs"
+      (let [res (g/realize! r prof [:ensure-dir {:path d}] {:stack [:python :sh] :resolve true})]
+        (is (= :ok (:status res)))
+        (is (= [:ctx/python->sh :sh.ensure-dir/mkdir] (take 2 (:realization res))))
+        (is (= :yes (p/verdict (:profile-after res) :sh.cmd/mkdir)))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "a command the inner sh cannot resolve is refuted, not planned"
+      (let [{res :result after :profile} (g/plan-resolving! r prof [:remove-file {:path d}] {:stack [:python :sh]})]
+        (is (= :no (p/verdict after :sh.cmd/rm)))
+        (is (= :unsatisfiable (:status res)))))))
+
+(def ^:private ascii-env {"LC_ALL" "C" "PYTHONUTF8" "0" "PYTHONCOERCECLOCALE" "0"})
+
+(deftest non-ascii-argv-under-an-ascii-locale
+  (let [r (rt/process-runtime {:id :py-ascii :lang :python :argv [(fx/tools :python3) "-c"]
+                               :env (assoc ascii-env "PATH" (fx/bin-dir! [:sh]))})
+        prof (g/resolve! r (g/discover! r) [:bin/sh])
+        dir (fx/tmp-dir! "grammar-ascii-")]
+    (is (= "ascii" (:out (rt/execute r "import sys;sys.stdout.write(sys.getfilesystemencoding())"))))
+    (doseq [[intent opts] [[[:str "caf\u00e9 \u03bb"] {:stack [:python :sh]}]
+                           [[:run {:argv ["sh" "-c" "test \"$1\" = caf\u00e9" "x" "caf\u00e9"]}] {}]
+                           [[:write-file {:path (str dir "/caf\u00e9") :content "\u00e9"}] {}]
+                           [[:ensure-dir {:path (str dir "/d\u00e9")}] {}]
+                           [[:remove-file {:path (str dir "/caf\u00e9")}] {}]]]
+      (let [res (g/realize! r prof intent opts)]
+        (is (= :ok (:status res)) (pr-str intent))
+        (is (true? (:ok? (:verified res))) (pr-str intent (:execution res)))))))
+
+(defspec py-sh-argv-evaluates-to-the-script 100
+  (prop/for-all [s (gen/such-that #(not (str/includes? % "\u0000")) gen/string 50)]
+    (let [run (rt/execute (:py-full @rts)
+                          (str "import sys;sys.stdout.buffer.write(b'\\0'.join(" (probe/py-sh-argv s) "))"))]
+      (java.util.Arrays/equals (.getBytes (str "sh\u0000-c\u0000" s) "UTF-8") ^bytes (:out-bytes run)))))
 
 (deftest unprobed-languages-are-refused
   (doseq [lang [:php :perl]]
