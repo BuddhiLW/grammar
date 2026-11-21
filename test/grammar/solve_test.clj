@@ -6,7 +6,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [grammar.core :as g]
             [grammar.profile :as p]
-            [grammar.schema :as s]))
+            [grammar.schema :as s]
+            [grammar.solve :as solve]))
 
 (defn declared
   "Profile whose verdicts are all declarations: yes caps, no caps, rest unknown."
@@ -123,6 +124,33 @@
     (testing "the shortest pruned length says why nothing fit"
       (let [res (g/plan prof :sh [:run {:argv ["echo" (apply str (repeat 4 "abcdefgh"))]}])]
         (is (< 30 (:pruned-min-bytes res)))))))
+
+(def ^:private nested-cut-registry
+  "sh->python (cost 1) over 50 python programs too long for :max-len 10,
+  then one that fits (total cost 1); a direct sh realization costing 5."
+  (let [leaf (fn [code] {:code code :via [] :requires #{} :stack [] :cost 0 :key []})]
+    {:realizations
+     [{:id :t.str/direct :intent :str :lang :sh :cost 5 :requires #{}
+       :render (fn [_ _] [(leaf "direct")])}
+      {:id :t.str/py :intent :str :lang :python :cost 0 :requires #{}
+       :render (fn [_ _] (concat (map #(leaf (str "far-too-long-" %)) (range 50)) [(leaf "py")]))}]
+     :wrappers
+     [{:id :t.ctx/sh->py :outer :sh :inner :python :cost 1 :requires #{}
+       :render (fn [_ code] [(leaf (str "p " code))])}]}))
+
+(deftest a-budget-cut-in-a-nested-stream-ends-the-search
+  (let [prof (p/declare-text (p/empty-profile :t) :max-len 10 "test")
+        env (solve/make-env prof nested-cut-registry)
+        plan (fn [prune? budget] (solve/solve (assoc env :prune? prune?) :sh [:str "x"] {:budget budget}))]
+    (doseq [budget [20 50]]
+      (testing (str "budget " budget ": the cut is reported, never a costlier sibling")
+        (let [res (plan true budget)]
+          (is (:budget-exhausted res))
+          (is (not= :ok (:status res)) "\"direct\" costs 5, more than the cheaper program past the cut")
+          (is (= (:status (plan false budget)) (:status res))))))
+    (testing "with room for the fitting program, both find it"
+      (is (= "p py" (:code (plan true 60))))
+      (is (= "p py" (:code (plan false 60)))))))
 
 (deftest every-result-carries-its-justification
   (doseq [prof [full

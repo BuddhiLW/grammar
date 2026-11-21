@@ -197,14 +197,20 @@
 (defn- search
   "Examine cands in order until one satisfies text, counting each examined
   candidate in meter m. Stops with :budget-exhausted once the examined and
-  pruned candidates together reach m's budget."
+  pruned candidates together reach m's budget and something is left. The
+  meter is read after the next candidate is realized and before it is
+  examined: realizing it may prune, and a prune that spends the budget
+  inside a nested stream cuts that stream only (marking m :cut), so the
+  candidate realized after it can come from a costlier sibling the budget
+  never reached."
   [cands text m]
   (loop [cs cands rejected []]
-    (let [s (when-not (spent? m) (seq cs))
+    (let [s (seq cs)
           n (:spent @m)]
       (cond
-        (and (nil? s) (or (spent? m) (:cut @m))) {:searched n :rejected rejected :budget-exhausted true}
+        (:cut @m) {:searched n :rejected rejected :budget-exhausted true}
         (nil? s) {:searched n :rejected rejected}
+        (spent? m) {:searched n :rejected rejected :budget-exhausted true}
         :else (let [cand (first s)
                     vs (violations text (:code cand))]
                 (vswap! m update :spent inc)
