@@ -76,11 +76,31 @@
   [prune? [prof lang intent opts]]
   (solve/solve (assoc (g/env prof) :prune? prune?) lang intent opts))
 
+(defn- with-budget
+  "Case c with its :budget set to budget."
+  [c budget]
+  (assoc-in c [3 :budget] budget))
+
+(defn- honest-under-budget?
+  "When a pass ran out of budget, pruned may stop at a different point than
+  free; but an :ok it returns is the program an unpruned search with room
+  to spare chooses, never a costlier sibling reached past a cut."
+  [c pruned]
+  (or (not= :ok (:status pruned))
+      (let [roomy (within-ms 5000 #(plan-with false (with-budget c 100000)))]
+        (and (map? roomy) (= (:code roomy) (:code pruned))))))
+
 (defspec pruning-changes-only-the-diagnostics 300
   (prop/for-all [c gen-case]
-    (let [pruned (within-ms 20000 #(plan-with true c))
-          free (within-ms 20000 #(plan-with false c))]
-      (or (some #{::timeout} [pruned free])
-          (:budget-exhausted free)
-          (:budget-exhausted pruned)
-          (= (apply dissoc free diagnostics) (apply dissoc pruned diagnostics))))))
+    (let [pruned (within-ms 5000 #(plan-with true c))
+          free (within-ms 5000 #(plan-with false c))]
+      (and (map? pruned) (map? free)
+           (if (or (:budget-exhausted free) (:budget-exhausted pruned))
+             (honest-under-budget? c pruned)
+             (= (apply dissoc free diagnostics) (apply dissoc pruned diagnostics)))))))
+
+(defspec a-tight-budget-never-yields-a-costlier-program 150
+  (prop/for-all [c gen-case budget (gen/choose 1 40)]
+    (let [c (with-budget c budget)
+          pruned (within-ms 5000 #(plan-with true c))]
+      (and (map? pruned) (honest-under-budget? c pruned)))))
