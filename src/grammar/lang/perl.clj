@@ -121,7 +121,7 @@
 (def wrappers
   [{:id :ctx/sh->perl :outer :sh :inner :perl :cost 11
     :requires #{:interp/perl}
-    :doc "Costs one more than :ctx/sh->python, so delegation prefers python3 by cost, not by id spelling."
+    :doc "Costs one more than :ctx/sh->python, so when inner costs tie delegation prefers python3 by cost, not by id spelling. Costs sum with the inner program's, so a cheaper inner perl program can still win."
     :render (fn [env code] (c/combine #(str "perl -e " %) (lit-in env :sh code)))}
    {:id :ctx/perl->sh :outer :perl :inner :sh :cost 10
     :requires #{:pl/system :interp/sh}

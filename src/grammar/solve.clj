@@ -4,9 +4,12 @@
 (ns grammar.solve
   "Deterministic planner. Pure: a profile and a registry in, a Result out.
 
-  Search order is fixed: realizations by [cost id], direct ones before
-  delegation through a context wrapper, children left to right. The first
-  candidate whose text satisfies the profile's text constraints wins.
+  Search is best-first by structural cost: a candidate's cost is the sum
+  of its realization and wrapper costs, literal encoders adding 0, so a
+  direct realization can lose to a cheaper delegation. Equal costs break
+  by pre-order (direct before delegation, realizations by [cost id],
+  children left to right). The first candidate whose text satisfies the
+  profile's text constraints wins.
 
   A realization is admitted only when every capability it requires is
   :yes. An :unknown never selects a program. When nothing is admitted the

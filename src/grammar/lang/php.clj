@@ -119,7 +119,7 @@
 (def wrappers
   [{:id :ctx/sh->php :outer :sh :inner :php :cost 11
     :requires #{:interp/php}
-    :doc "Costs one more than :ctx/sh->python, so delegation prefers python3 by cost, not by id spelling."
+    :doc "Costs one more than :ctx/sh->python, so when inner costs tie delegation prefers python3 by cost, not by id spelling. Costs sum with the inner program's, so a cheaper inner php program can still win."
     :render (fn [env code] (c/combine #(str "php -r " %) (lit-in env :sh code)))}
    {:id :ctx/php->php :outer :php :inner :php :cost 5
     :requires #{}
