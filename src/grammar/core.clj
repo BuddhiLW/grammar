@@ -16,25 +16,68 @@
            [java.nio.file Files]
            [java.util Arrays]))
 
+(def core-module
+  "The built-in languages, :sh and :python."
+  {:id :core
+   :realizations realize/realizations
+   :wrappers realize/wrappers
+   :probes probe/probes})
+
+(def modules
+  "The language modules the facade composes, in order. A module is data in
+  the shapes of grammar.realize and grammar.probe:
+
+    {:id kw :realizations [...] :wrappers [...] :probes [...]}
+
+  Probes run in module order, so a module's probes may need capabilities
+  that an earlier module proves. A language reached through sh needs
+  :sh/single-quote from :core, which is why :core comes first."
+  [core-module])
+
+(defn- duplicates [xs]
+  (into [] (keep (fn [[x n]] (when (< 1 n) x))) (frequencies xs)))
+
+(defn compose
+  "One registry from mods: their realizations, wrappers and probes
+  concatenated in module order. Refuses two realizations or two wrappers with
+  one id, and two probes for one capability, because the solver orders by id
+  and the profile keeps one verdict per capability."
+  [mods]
+  (let [reg {:realizations (into [] (mapcat :realizations) mods)
+             :wrappers (into [] (mapcat :wrappers) mods)
+             :probes (into [] (mapcat :probes) mods)}
+        clash (into {}
+                    (keep (fn [[k key-fn]]
+                            (when-let [d (seq (duplicates (map key-fn (get reg k))))]
+                              [k (vec d)])))
+                    [[:realizations :id] [:wrappers :id] [:probes :cap]])]
+    (when (seq clash)
+      (throw (ex-info "language modules collide" {:modules (mapv :id mods) :duplicates clash})))
+    reg))
+
 (defn discover!
-  "Probe runtime and return its evidence-backed profile."
-  [runtime]
-  (probe/discover (rt/runtime-id runtime) #(rt/execute runtime %)))
+  "Probe runtime with the probes of the language modules (opts :modules,
+  default `modules`) and return its evidence-backed profile."
+  ([runtime] (discover! runtime {}))
+  ([runtime {mods :modules :or {mods modules}}]
+   (probe/discover (rt/runtime-id runtime) #(rt/execute runtime %) (:probes (compose mods)))))
 
 (defn env
-  "Planning environment with the built-in registry. opts pass through to
+  "Planning environment over the realizations and wrappers of the language
+  modules (opts :modules, default `modules`). Other opts pass through to
   grammar.solve/make-env (e.g. :admit)."
   ([profile] (env profile {}))
-  ([profile opts]
-   (solve/make-env profile (merge {:realizations realize/realizations
-                                   :wrappers realize/wrappers}
-                                  opts))))
+  ([profile {mods :modules :or {mods modules} :as opts}]
+   (solve/make-env profile (merge (select-keys (compose mods) [:realizations :wrappers])
+                                  (dissoc opts :modules)))))
 
 (defn plan
-  "Pure: choose a realization of intent in lang under profile."
+  "Pure: choose a realization of intent in lang under profile. opts :admit
+  and :modules shape the environment (see env); the rest go to solve."
   ([profile lang intent] (plan profile lang intent {}))
   ([profile lang intent opts]
-   (solve/solve (env profile (select-keys opts [:admit])) lang intent (dissoc opts :admit))))
+   (solve/solve (env profile (select-keys opts [:admit :modules]))
+                lang intent (dissoc opts :admit :modules))))
 
 (defn- utf8 ^bytes [^String s] (.getBytes s "UTF-8"))
 
