@@ -117,10 +117,15 @@
 
 (def posix-words-text
   "What :sh/posix-words sends: one printf whose operand holds a newline, !,
-  a single quote, $, a backslash, a tab and a double space, in single
-  quotes and backslash escapes. csh rejects the newline and expands !,
-  fish keeps the backslashes, so neither prints the expected bytes."
-  "a\n!b'$c\\d\te  f")
+  a single quote, $, a lone backslash, a DOUBLE backslash, a backslash
+  right before a single quote, a tab and a double space, in single quotes
+  and backslash escapes. Each one is there to refute a dialect:
+    csh   rejects the newline in quotes and expands !
+    fish  turns \\\\ into \\ and \\' into ' inside single quotes, so the
+          double backslash shrinks and the backslash-quote ends early
+  A shell that passes it treats single quotes as POSIX does, which is all
+  a single-quoted hop needs."
+  "a\n!b'$c\\d\\\\e\\'f\tg  h")
 
 (def probes
   "Probes of the far side of a hop, run IN the stacked runtime.

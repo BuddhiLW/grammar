@@ -14,9 +14,14 @@
   Dialects:
     :posix  POSIX sh (dash, busybox ash): '..' \"..\" and backslash
     :bash   :posix plus ANSI-C $'..' quoting
-    :fish   single quotes take \\\\ and \\' escapes; double quotes refused
+    :fish   single quotes take \\\\ and \\' escapes; double quotes and
+            every unquoted backslash refused
     :csh    single quotes may not hold a newline, ! is history even
-            inside them; double quotes refused
+            inside them; double quotes and every unquoted backslash
+            refused
+
+  Unquoted ~ is refused in every dialect: bash expands it after = or : in
+  any assignment-shaped word, even outside command position.
 
   parse returns {:pipeline [[word ...] ...]} or {:error msg :at index}.")
 
@@ -107,8 +112,10 @@
                    (refuse "unquoted $" j))
         (= c \\) (let [n (when (< (inc j) (count s)) (.charAt s (inc j)))]
                    (cond (nil? n) (refuse "trailing backslash" j)
+                         (#{:fish :csh} dialect) (refuse (str (name dialect) ": unquoted backslash not modeled") j)
                          (= n \newline) (recur (+ j 2) acc pure?)
                          :else (recur (+ j 2) (.append acc n) false)))
+        (= c \~) (refuse "unquoted ~ (bash expands it after = or : in any word that looks like an assignment)" j)
         (= c \') (let [[t k] (single-quoted dialect s (inc j))] (recur k (.append acc ^String t) false))
         (= c \") (if (#{:posix :bash} dialect)
                    (let [[t k] (double-quoted s (inc j))] (recur k (.append acc ^String t) false))
@@ -125,7 +132,10 @@
       (cond
         (nil? c) {:pipeline (close words)}
         (#{\space \tab} c) (recur (inc i) words cmds)
-        (and (= c \\) (< (inc i) (count s)) (= \newline (.charAt s (inc i)))) (recur (+ i 2) words cmds)
+        (and (= c \\) (< (inc i) (count s)) (= \newline (.charAt s (inc i))))
+        (if (#{:fish :csh} dialect)
+          (refuse (str (name dialect) ": backslash-newline not modeled") i)
+          (recur (+ i 2) words cmds))
         (= c \|) (if (and (< (inc i) (count s)) (= \| (.charAt s (inc i))))
                    (refuse "|| list" i)
                    (recur (inc i) [] (close words)))

@@ -153,3 +153,67 @@
     (testing "the parse trace names each host and user in order"
       (is (= [["local" "me"] ["vm1" "me"] ["vm1" "root"] ["vm3" "root"]]
              (mapv (juxt :host :user) (:trace (r/run world :sh (encode env [:ssh1 :sudo :jump3] inner)))))))))
+
+;; ---------------------------------------------------------------- raw payloads, hostile hosts
+
+(def hostile-hops
+  "Direct hops into non-POSIX login shells: the planner must never use
+  them (:sh/posix-words refutes them), and the oracle must refuse what
+  they would garble rather than deliver other bytes."
+  {:ssh-fish (cx/ssh-hop {:route :fbox :dest "fbox"})
+   :ssh-csh  (cx/ssh-hop {:route :cbox :dest "cbox"})})
+
+(def all-hops (merge hops hostile-hops))
+
+(def posix-probe (first (filter #(= :sh/posix-words (:cap %)) cx/probes)))
+
+(def gen-raw-text
+  "Payload text crossing hops AS RAW BYTES inside the quoted words:
+  quotes, $, backticks, backslash runs, backslash-quote, newlines, !,
+  non-ASCII, astral code points. No NUL (no argv word holds one)."
+  (gen/fmap #(apply str %)
+            (gen/vector (gen/one-of [(gen/elements ["'" "\\" "\\\\" "\\'" "\"" "$" "`" "\n" "!" " " "*" "-"
+                                                    "λ" "🚀" "%s" "x"])
+                                     gen/string-ascii])
+                        0 16)))
+
+(defn raw-leaf
+  "printf %s W: the payload itself, one quoted word, no octal escape."
+  [env s]
+  (str "printf %s " (:code (first ((:lit env) :sh s)))))
+
+(def gen-hostile-chain
+  "1..4 sh hops, any of which may be a direct hop into fish or csh."
+  (gen/vector (gen/elements (concat [:sh :env :sudo :ssh1 :jump3 :stdin-c] (keys hostile-hops))) 1 4))
+
+(defn encode* [env ks code]
+  (reduce (fn [code k] (:code (first ((:render (all-hops k)) env code)))) code (reverse ks)))
+
+(def raw-outcomes (atom {:ok 0 :refused 0}))
+
+(def raw-prop
+  (prop/for-all [ks gen-hostile-chain
+                 s gen-raw-text
+                 se gen-sh-enc]
+    (let [env (lit-env se lit/py-single)
+          res (r/run world :sh (encode* env ks (raw-leaf env s)))
+          hostile? (some hostile-hops ks)]
+      (swap! raw-outcomes update (cond (:error res) :refused
+                                       (= s (r/out-string res)) :ok
+                                       :else :garbled) (fnil inc 0))
+      (if hostile?
+        ;; a direct hop into fish or csh may garble or refuse; what must
+        ;; hold is that the planner can never pick it: the posix-words
+        ;; probe sent through every hostile hop of the chain fails
+        (every? (fn [k] (not= (:expect posix-probe) (r/out-string (r/run world :sh (encode* env [k] (:script posix-probe))))))
+                (filter hostile-hops ks))
+        (and (nil? (:error res)) (= s (r/out-string res)))))))
+
+(deftest raw-acceptance-is-not-vacuous
+  (reset! raw-outcomes {:ok 0 :refused 0})
+  (let [q (clojure.test.check/quick-check 600 raw-prop)]
+    (is (:pass? q) (pr-str (:shrunk q))))
+  (let [{:keys [ok refused garbled] :or {garbled 0}} @raw-outcomes]
+    (println "raw payloads, chains with direct fish/csh hops allowed: delivered" ok "refused" refused "garbled" garbled)
+    (is (> ok 250) (str "delivered " ok " of 600"))
+    (is (> refused 60) (str "refused " refused " of 600: the hostile hops must be exercised"))))
