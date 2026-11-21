@@ -23,52 +23,104 @@
   [probe]
   (:lang probe :sh))
 
-(def os-functions
-  "The os functions the python realizations reach: pathlib's mkdir calls
-  os.mkdir, its unlink calls os.unlink. Each has a fixed :py.os/<f> probe."
-  ["mkdir" "unlink"])
+(defn- py-lines
+  "One python program from its lines."
+  [& lines]
+  (str/join "\n" lines))
 
-(defn- os-fn-probe [f]
-  {:cap (keyword "py.os" f) :lang :python :needs [:py/sys]
-   :script (str "import os,sys;sys.stdout.write(\"ok\" if callable(getattr(os," (lit/py-double f)
-                ",None)) else \"no\")")
-   :expect "ok"})
+(def ^:private py-scratch
+  "python statement binding p to a fresh path under $TMPDIR (else /tmp),
+  named by pid and random bytes. tempfile is not used on purpose: its
+  gettempdir writes a test file, so a runtime that refuses writes would
+  refute mkdir too."
+  (str "p=pathlib.Path(os.environ.get(\"TMPDIR\") or \"/tmp\","
+       "\"grammar-probe-%d-%s\"%(os.getpid(),os.urandom(4).hex()))"))
+
+(defn- guarded
+  "python program that imports sys, then runs body (lines) after importing
+  modules. Anything raised in there (a missing module, an OSError, a
+  refusal from an audit hook) prints no, with the exception on stderr: the
+  program ran and the law was refuted. Only a program that never ran is
+  :unknown."
+  [modules & body]
+  (apply py-lines "import sys" "try:" (str " import " modules)
+         (concat (map #(str " " %) body)
+                 ["except Exception as e:sys.stderr.write(repr(e));sys.stdout.write(\"no\")"])))
 
 (def py-probes
   "Probes written in python, for a runtime whose language is :python
   (python3 -c). Ordered like `probes`: every :needs is probed earlier in
-  this list. The scripts hold no single quote, so each one lifts into an sh
-  probe unchanged (see python-via-sh).
+  this list. A probe performs the operation its law is about, never just an
+  import: a runtime that refuses it (a missing module, an OSError, an audit
+  hook raising on subprocess, socket or a write-mode open) prints no. Each
+  script lifts into an sh probe (see python-via-sh).
 
     :py/sys            import sys and sys.stdout.write work
     :py/stdout-buffer  bytes written to sys.stdout.buffer arrive unchanged:
                        NUL, a two-byte UTF-8 sequence and CR LF included
     :py/pathlib        import pathlib
-    :py/subprocess     import subprocess
-    :py/urllib         import shutil, urllib.request
-    :py.os/<f>         os.<f> exists and is callable, for f in os-functions
+    :py/open-write     pathlib writes a file under $TMPDIR (else /tmp) and
+                       reads the same bytes back
+    :py.os/mkdir       pathlib.mkdir (os.mkdir) makes a directory there
+    :py.os/unlink      pathlib.unlink (os.unlink) removes a symlink made
+                       there, so it needs no write-mode open; a runtime that
+                       refuses os.symlink refutes it too
+    :py/subprocess     subprocess runs sys.executable as a child and reads
+                       its stdout
+    :py/urllib         urllib.request fetches a body from a server this
+                       script listens with on 127.0.0.1
     :interp/sh         subprocess runs [\"sh\" \"-c\" ...], sh found on PATH:
-                       the argv :ctx/python->sh runs. A /bin/sh off PATH does
-                       not count. Marked :lift false: sh runtimes prove
-                       :interp/sh with their own probe."
-  (-> [{:cap :py/sys :lang :python :needs []
-        :script "import sys;sys.stdout.write(\"ok\")" :expect "ok"}
-       {:cap :py/stdout-buffer :lang :python :needs []
-        :script "import sys;b=sys.stdout.buffer;b.write(bytes([111,0,195,169,13,10,107]));b.flush()"
-        :expect "o\u0000\u00e9\r\nk"}
-       {:cap :py/pathlib :lang :python :needs [:py/sys]
-        :script "import pathlib,sys;sys.stdout.write(\"ok\")" :expect "ok"}
-       {:cap :py/subprocess :lang :python :needs [:py/sys]
-        :script "import subprocess,sys;sys.stdout.write(\"ok\")" :expect "ok"}
-       {:cap :py/urllib :lang :python :needs [:py/sys]
-        :script "import shutil,sys,urllib.request;sys.stdout.write(\"ok\")" :expect "ok"}]
-      (into (map os-fn-probe) os-functions)
-      (conj {:cap :interp/sh :lang :python :lift false :needs [:py/sys :py/subprocess]
-             :script (str "import subprocess,sys\n"
-                          "try:o=subprocess.run([\"sh\",\"-c\",\"printf %s ok\"],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE).stdout\n"
-                          "except OSError:o=b\"no\"\n"
-                          "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
-             :expect "ok"})))
+                       the argv :ctx/python->sh runs. With PATH set, a
+                       /bin/sh off PATH does not count; with PATH unset
+                       python searches os.defpath, as the wrapper does.
+                       Marked :lift false: sh runtimes prove :interp/sh with
+                       their own probe."
+  [{:cap :py/sys :lang :python :needs []
+    :script "import sys;sys.stdout.write(\"ok\")" :expect "ok"}
+   {:cap :py/stdout-buffer :lang :python :needs [:py/sys]
+    :script "import sys;b=sys.stdout.buffer;b.write(bytes([111,0,195,169,13,10,107]));b.flush()"
+    :expect "o\u0000\u00e9\r\nk"}
+   {:cap :py/pathlib :lang :python :needs [:py/sys]
+    :script "import pathlib,sys;sys.stdout.write(\"ok\")" :expect "ok"}
+   {:cap :py/open-write :lang :python :needs [:py/sys :py/pathlib]
+    :script (guarded "os,pathlib" py-scratch
+                     "p.write_bytes(b\"ok\")" "r=p.read_bytes()"
+                     "try:p.unlink()" "except Exception:pass"
+                     "sys.stdout.write(r.decode())")
+    :expect "ok"}
+   {:cap :py.os/mkdir :lang :python :needs [:py/sys :py/pathlib]
+    :script (guarded "os,pathlib" py-scratch
+                     "p.mkdir(parents=True,exist_ok=True)" "r=\"ok\" if p.is_dir() else \"no\""
+                     "try:p.rmdir()" "except Exception:pass"
+                     "sys.stdout.write(r)")
+    :expect "ok"}
+   {:cap :py.os/unlink :lang :python :needs [:py/sys :py/pathlib]
+    :script (guarded "os,pathlib" py-scratch
+                     "os.symlink(\"grammar-probe-target\",p)" "p.unlink(missing_ok=True)"
+                     "sys.stdout.write(\"no\" if os.path.lexists(p) else \"ok\")")
+    :expect "ok"}
+   {:cap :py/subprocess :lang :python :needs [:py/sys]
+    :script (guarded "subprocess"
+                     (str "o=subprocess.run([sys.executable,\"-c\",\"import sys;sys.stdout.write(sys.argv[1])\",\"ok\"],"
+                          "stdout=subprocess.PIPE).stdout")
+                     "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
+    :expect "ok"}
+   {:cap :py/urllib :lang :python :needs [:py/sys]
+    :script (guarded "shutil,socket,threading,urllib.request"
+                     "s=socket.socket();s.bind((\"127.0.0.1\",0));s.listen(1)"
+                     "def h():"
+                     " c=s.accept()[0];c.recv(65536)"
+                     " c.sendall(b\"HTTP/1.0 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nok\");c.close()"
+                     "threading.Thread(target=h,daemon=True).start()"
+                     "r=urllib.request.urlopen(\"http://127.0.0.1:%d/\"%s.getsockname()[1],timeout=5)"
+                     "sys.stdout.write(r.read().decode())")
+    :expect "ok"}
+   {:cap :interp/sh :lang :python :lift false :needs [:py/sys :py/subprocess]
+    :script (guarded "subprocess"
+                     (str "o=subprocess.run([\"sh\",\"-c\",\"printf %s ok\"],"
+                          "stdout=subprocess.PIPE).stdout")
+                     "sys.stdout.write(o.decode(\"utf-8\",\"replace\"))")
+    :expect "ok"}])
 
 (defn- python-law?
   "True for a python probe whose law is about python itself, so that an sh

@@ -29,12 +29,40 @@
   (rt/process-runtime {:id id :lang :python :argv [(fx/tools :python3) "-c"]
                        :env (merge {"PATH" (fx/bin-dir! tool-ks) "LC_ALL" "C.UTF-8"} extra-env)}))
 
+(defn audit-site
+  "sitecustomize source installing an audit hook that raises PermissionError
+  on every event in events (a prefix match) and, when writes? is true, on
+  every open whose flags ask to write. The e2e lab restricts python this
+  way; the import machinery tolerates an OSError, so the interpreter still
+  starts."
+  [events writes?]
+  (str "import os,sys\n"
+       "_B=(" (str/join "" (map #(str "\"" % "\",") events)) ")\n"
+       "_W=os.O_WRONLY|os.O_RDWR|os.O_CREAT|os.O_APPEND|os.O_TRUNC\n"
+       "def _h(ev,a):\n"
+       " if ev.startswith(_B) or (" (if writes? "True" "False")
+       " and ev==\"open\" and len(a)>2 and isinstance(a[2],int) and a[2]&_W):\n"
+       "  raise PermissionError(\"audit: \"+ev)\n"
+       "sys.addaudithook(_h)\n"))
+
+(def lab-events
+  "What the e2e lab's hook refuses: spawning and the network."
+  ["subprocess.Popen" "os.system" "os.exec" "os.posix_spawn" "os.spawn" "os.fork"
+   "socket." "urllib.Request"])
+
+(defn- audited-rt!
+  [id events writes?]
+  (py-rt! id [:sh] {"PYTHONPATH" (site-dir! (audit-site events writes?))
+                    "PYTHONDONTWRITEBYTECODE" "1"}))
+
 (def ^:private rts
   (delay
     {:py-full (py-rt! :py-full [:sh] {})
      :py-nosub (py-rt! :py-nosub [:sh]
                        {"PYTHONPATH" (site-dir! "import sys\nsys.modules[\"subprocess\"]=None\n")})
-     :py-nosh (py-rt! :py-nosh [] {})}))
+     :py-nosh (py-rt! :py-nosh [] {})
+     :py-audit (audited-rt! :py-audit lab-events true)
+     :py-audit-fs (audited-rt! :py-audit-fs ["os.mkdir" "os.remove" "os.symlink"] false)}))
 
 (def ^:private profs (delay (update-vals @rts g/discover!)))
 
@@ -73,16 +101,54 @@
       (is (= :unknown (v py-nosub :interp/sh)))
       (is (str/includes? (str (:reason (ev py-nosub :py-nosub :interp/sh)))
                          "prerequisite not proven: :py/subprocess=no"))
-      (doseq [cap [:py/sys :py/stdout-buffer :py/pathlib :py/urllib :py.os/mkdir :py.os/unlink]]
+      (doseq [cap [:py/sys :py/stdout-buffer :py/pathlib :py/open-write :py/urllib :py.os/mkdir :py.os/unlink]]
         (is (= :yes (v py-nosub cap)) (str cap))))
     (testing "no sh on PATH: subprocess imports, but running sh is refuted"
       (is (= :yes (v py-nosh :py/subprocess)))
       (is (= :no (v py-nosh :interp/sh)))
       (is (= "no" (:out (ev py-nosh :py-nosh :interp/sh)))))))
 
+(deftest audit-hooks-are-detected
+  (let [{:keys [py-audit py-audit-fs]} @profs
+        v p/verdict
+        ev (fn [prof id cap] (get-in prof [:evidence (probe/evidence-id id cap)]))]
+    (testing "the lab's hook: spawning, sockets and write-mode open are refuted, with the refusal kept"
+      (doseq [[cap event] [[:py/subprocess "subprocess.Popen"] [:py/urllib "socket"] [:py/open-write "open"]]]
+        (is (= :no (v py-audit cap)) (str cap))
+        (is (str/includes? (str (:err (ev py-audit :py-audit cap))) (str "audit: " event)) (str cap)))
+      (is (= :unknown (v py-audit :interp/sh)) "sh is never tried once subprocess is refuted")
+      (doseq [cap [:py/sys :py/stdout-buffer :py/pathlib :py.os/mkdir :py.os/unlink]]
+        (is (= :yes (v py-audit cap)) (str cap))))
+    (testing "a hook on os.mkdir and os.remove: the fs caps are refuted, everything else holds"
+      (is (= :no (v py-audit-fs :py.os/mkdir)))
+      (is (= :no (v py-audit-fs :py.os/unlink)))
+      (doseq [cap [:py/open-write :py/subprocess :py/urllib :interp/sh]]
+        (is (= :yes (v py-audit-fs cap)) (str cap))))))
+
+(deftest audited-plans-refuse-or-reroute
+  (let [{:keys [py-audit py-audit-fs]} @profs
+        dir (fx/tmp-dir! "grammar-audit-")]
+    (testing ":str still runs: stdout needs no forbidden operation"
+      (let [res (g/realize! (:py-audit @rts) py-audit [:str "it's \u00e9"])]
+        (is (= :ok (:status res)))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "write-file, http-get, run and delegation to sh are refused, citing the refutation"
+      (doseq [[intent opts cap] [[[:write-file {:path (str dir "/w") :content "x"}] {} :py/open-write]
+                                 [[:http-get {:url "http://127.0.0.1:1/"}] {} :py/urllib]
+                                 [[:run {:argv ["true"]}] {} :py/subprocess]
+                                 [[:str "x"] {:stack [:python :sh]} :py/subprocess]]]
+        (let [res (g/plan py-audit :python intent opts)]
+          (is (= :unsatisfiable (:status res)) (pr-str intent (:needs res)))
+          (is (some #{(probe/evidence-id :py-audit cap)} (:evidence res)) (pr-str intent)))))
+    (testing "fs ops are refused where os.mkdir/os.remove are hooked, nothing runs"
+      (doseq [intent [[:ensure-dir {:path (str dir "/d")}] [:remove-file {:path (str dir "/f")}]]]
+        (let [res (g/realize! (:py-audit-fs @rts) py-audit-fs intent)]
+          (is (not= :ok (:status res)) (pr-str intent))
+          (is (nil? (:execution res))))))))
+
 (deftest str-and-write-file-plan-run-and-verify
   (let [out (fx/tmp-dir! "grammar-pyrt-")]
-    (doseq [[id runtime] @rts
+    (doseq [[id runtime] (select-keys @rts [:py-full :py-nosub :py-nosh])
             :let [prof (@profs id)]]
       (testing (str id)
         (doseq [s ["" "it's \"x\" $HOME `id` \\" "\u00fcn\u00ef\ncode\ttab" "nul\u0000byte"]]

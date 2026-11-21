@@ -100,7 +100,8 @@
               (c/combine (fn [f p] (str "printf " f " >" p))
                          (lit-in env :sh (lit/printf-format content)) (lit-in env :sh path)))}
    {:id :py.write-file/pathlib :intent :write-file :lang :python :cost 1
-    :requires #{:py/pathlib}
+    :requires #{:py/pathlib :py/open-write}
+    :doc "write_bytes opens path in write mode: a runtime whose audit hook refuses that refutes :py/open-write."
     :render (fn [env [_ {:keys [path content]}]]
               (c/combine (fn [p c] (str "import pathlib;pathlib.Path(" p ").write_bytes(" c ".encode())"))
                          (lit-in env :python path) (lit-in env :python content)))}
@@ -167,7 +168,7 @@
     :render (fn [env [_ {:keys [url]}]]
               (when (http-only? url) (sh-words env ["busybox" "wget" "-qO-" "--" url])))}
    {:id :py.http-get/urllib :intent :http-get :lang :python :cost 1
-    :requires #{:py/urllib}
+    :requires #{:py/urllib :py/stdout-buffer}
     :doc "urlopen follows 301, 302, 303 and 307 redirects (308 from Python 3.11 on), raises HTTPError for a 4xx/5xx answer and URLError when it cannot connect. A body shorter than its Content-Length leaves r.length non-zero (read(amt) returns b'' instead of raising IncompleteRead), so that raises too. sys.exit(repr(e)) prints the error on stderr and exits 1. The program text holds no quote character of its own."
     :render (fn [env [_ {:keys [url]}]]
               (c/combine #(str "import shutil,sys,urllib.request\n"
