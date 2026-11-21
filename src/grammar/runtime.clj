@@ -53,14 +53,73 @@
   [{:keys [id lang argv env timeout-ms] :or {lang :sh timeout-ms 10000}}]
   (->ProcessRuntime id lang (vec argv) env timeout-ms))
 
+(def frame-open "Marker printed on the far side before the program runs." "\u0001grammar-hop\u0002")
+(def frame-close "Marker before the far side's exit status." "\u0001grammar-hop-exit:")
+
+(defn- index-of-bytes
+  "Index of the first occurrence of needle in hay at or after from, or -1."
+  ^long [^bytes hay ^bytes needle ^long from]
+  (let [n (alength needle) m (- (alength hay) n)]
+    (loop [i from]
+      (cond (> i m) -1
+            (java.util.Arrays/equals hay i (+ i n) needle 0 n) i
+            :else (recur (inc i))))))
+
+(defn- last-index-of-bytes ^long [^bytes hay ^bytes needle]
+  (let [n (alength needle)]
+    (loop [i (- (alength hay) n)]
+      (cond (neg? i) -1
+            (java.util.Arrays/equals hay i (+ i n) needle 0 n) i
+            :else (recur (dec i))))))
+
+(defn unframe
+  "Split a framed run: the far side's stdout between the markers, its exit
+  status, and any bytes before the open marker (:noise: login banners,
+  rc-file output). A run whose frame is missing or torn never reached the
+  far side's program, or did not finish there: {:error ...}, which a probe
+  judges :unknown, never :no."
+  [{:keys [out-bytes] :as run}]
+  (if (:error run)
+    run
+    (let [^bytes ob out-bytes
+          o (.getBytes ^String frame-open "UTF-8")
+          c (.getBytes ^String frame-close "UTF-8")
+          i (index-of-bytes ob o 0)
+          j (last-index-of-bytes ob c)
+          tail (when (>= j 0) (String. ob (int (+ j (alength c))) (int (- (alength ob) j (alength c))) "UTF-8"))
+          code (when tail (re-matches #"(\d+)\n?" tail))]
+      (if (or (neg? i) (< j i) (nil? code))
+        (-> run
+            (dissoc :out :out-bytes)
+            (assoc :error (str "hop transport failed (outer exit " (:exit run) "): no complete frame from the far side")
+                   :transport-exit (:exit run)
+                   :raw-out (String. ob "UTF-8")))
+        (let [body (java.util.Arrays/copyOfRange ob (int (+ i (alength o))) (int j))]
+          (cond-> (assoc run :exit (Long/parseLong (second code)) :transport-exit (:exit run)
+                         :out-bytes body :out (String. body "UTF-8"))
+            (pos? i) (assoc :noise (String. ob 0 (int i) "UTF-8"))))))))
+
+(defn frame
+  "sh program text running code with its stdout framed for unframe. code
+  runs as the script of a child `sh -c` (its own word, so an exit or a
+  syntax error in it cannot skip the close marker), and the marker
+  carries its exit status. The frame itself uses only printf, single
+  quotes and $?."
+  [code]
+  (let [q (str "'" (.replace ^String code "'" "'\\''") "'")]
+    (str "printf '\\001grammar-hop\\002'; sh -c " q "\nprintf '\\001grammar-hop-exit:%s\\n' \"$?\"")))
+
 (defrecord StackedRuntime [id lang outer wrap]
   IRuntime
   (runtime-id [_] id)
   (runtime-lang [_] lang)
   (execute [_ code]
-    (if-let [outer-code (wrap code)]
-      (assoc (execute outer outer-code) :relayed outer-code)
-      {:argv [] :error "the hop cannot carry this program"})))
+    (let [framed? (= :sh lang)
+          inner (if framed? (frame code) code)]
+      (if-let [outer-code (wrap inner)]
+        (cond-> (assoc (execute outer outer-code) :relayed outer-code)
+          framed? unframe)
+        {:argv [] :error "the hop cannot carry this program"}))))
 
 (defn stacked-runtime
   "A runtime reached THROUGH another one: execute renders code with wrap

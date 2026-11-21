@@ -48,3 +48,22 @@
 (deftest a-hop-that-cannot-carry-the-program-never-runs
   (let [far (rt/stacked-runtime {:id :x :outer (:root @lab) :wrap (constantly nil)})]
     (is (some? (:error (rt/execute far "printf %s ok"))))))
+
+(deftest a-failed-hop-is-unknown-not-refuted
+  (let [root (:root @lab)
+        dead (rt/stacked-runtime {:id :dead :outer root :wrap (fn [_] "echo 'Permission denied (publickey).' >&2; exit 255")})
+        p (g/discover! dead {:modules mods})]
+    (testing "ssh's 255, sudo -n's refusal: no frame, so :error and :unknown"
+      (is (some? (:error (rt/execute dead "printf %s ok"))))
+      (is (= 255 (:transport-exit (rt/execute dead "printf %s ok"))))
+      (is (= :unknown (p/verdict p :sh/printf)))
+      (is (empty? (filter #(= :no (:verdict %)) (vals (:evidence p))))))))
+
+(deftest far-side-noise-and-status-are-separated
+  (let [root (:root @lab)
+        noisy (rt/stacked-runtime {:id :noisy :outer root
+                                   :wrap #(str "printf %s 'motd: welcome'; sh -c " (grammar.lit/sh-single %))})
+        run (rt/execute noisy "printf %s ok; exit 3")]
+    (is (= "ok" (:out run)))
+    (is (= 3 (:exit run)) "the far program's own status, not the transport's")
+    (is (= "motd: welcome" (:noise run)) "rc-file output is kept for diagnosis, never judged")))
