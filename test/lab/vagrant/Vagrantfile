@@ -47,6 +47,10 @@ NODES = {
 
 Vagrant.configure("2") do |config|
   config.vm.synced_folder ".", "/vagrant", disabled: true
+  # Keep the box's well-known insecure key: a vagrant crash halfway
+  # through swapping it once left vm1 refusing every key. The lab is
+  # private, short-lived and destroyed after each run; the relay users
+  # accept only the per-run lab key.
   config.ssh.insert_key = false
   NODES.each do |name, n|
     config.vm.define name do |c|

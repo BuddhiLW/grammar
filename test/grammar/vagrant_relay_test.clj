@@ -34,14 +34,17 @@
   address, the rest by name from inside."
   ([] (config! (System/getenv "GRAMMAR_VAGRANT_KEY")))
   ([k]
-   (let [f (java.io.File/createTempFile "grammar-vlab" ".cfg")]
+   (let [d (.toFile (java.nio.file.Files/createTempDirectory "grammar-vlab-" (make-array java.nio.file.attribute.FileAttribute 0)))
+         f (java.io.File. d "config")
+         cp (str d "/cm-%C")]
+     (.deleteOnExit d)
      (.deleteOnExit f)
      (spit f (str/join "\n" ["Host *" (str "  IdentityFile " k) "  IdentitiesOnly yes"
                              "  UserKnownHostsFile /dev/null" "  StrictHostKeyChecking no" "  LogLevel ERROR"
                              "  ConnectTimeout 15"
                              "Host vm1" (str "  HostName " (or (System/getenv "GRAMMAR_VAGRANT_VM1_HOST") "192.168.56.211"))
                              (str "  Port " (or (System/getenv "GRAMMAR_VAGRANT_VM1_PORT") "22")) "  User relay"
-                             "  ControlMaster auto" (str "  ControlPath " (System/getProperty "java.io.tmpdir") "/gvl-%C")
+                             "  ControlMaster auto" (str "  ControlPath " cp)
                              "  ControlPersist 120" ""]))
      (str f))))
 
@@ -57,6 +60,9 @@
                                       (cx/sudo-hop {:route :app :user "app"})])
    :csh-direct               (fn [o] [(cx/ssh-hop {:route :vm1 :dest "vm1" :opts o})
                                       (cx/ssh-hop {:route :vm2c :dest "cshu@vm2"})])
+   :fish-direct              (fn [o] [(cx/ssh-hop {:route :vm1 :dest "vm1" :opts o})
+                                      (cx/ssh-hop {:route :vm2 :dest "relay@vm2"})
+                                      (cx/ssh-hop {:route :vm3f :dest "fishu@vm3"})])
    :csh-stdin                (fn [o] [(cx/ssh-hop {:route :vm1 :dest "vm1" :opts o})
                                       (cx/ssh-stdin-hop {:route :vm2c :dest "cshu@vm2"})])
    :fish-stdin-3             (fn [o] [(cx/ssh-hop {:route :vm1 :dest "vm1" :opts o})
@@ -103,10 +109,13 @@
           (let [{:keys [lc one q]} (check-chain cfg k 20)]
             (is (= (mapv :context (:hops lc)) (:hops (:res one))))
             (is (:pass? q) (pr-str (:shrunk q))))))
-      (testing "a direct hop into tcsh is refuted; the planner reports it, never runs it"
-        (let [lc (lab-chain cfg :csh-direct)]
-          (is (= :no (p/verdict (get (:profiles lc) :ssh/vm2c) :sh/posix-words)))
-          (is (= :unsatisfiable (:status (solve/solve (:env lc) :sh [:str "x"] {:target :ssh/vm2c}))))))
+      (doseq [k [:csh-direct :fish-direct]]
+        (testing (str (name k) ": a direct hop into a non-POSIX login is refuted; the planner never runs it")
+          (let [lc (lab-chain cfg k)]
+            (println "vagrant" (name k) "posix-words" (p/verdict (get (:profiles lc) (:target lc)) :sh/posix-words))
+            (is (= :no (p/verdict (get (:profiles lc) (:target lc)) :sh/posix-words)))
+            (is (= :unsatisfiable (:status (solve/solve (:env lc) :sh [:str "a\\\\b\\';id;\\'"] {:target (:target lc)})))))))
       (testing "the far end is who it says"
-        (let [far (get-in (lab-chain cfg :mixed-jump-nested-sudo-u) [:runtimes :sudo/app])]
+        (let [lc (lab-chain cfg :mixed-jump-nested-sudo-u)
+              far (get-in lc [:runtimes (:target lc)])]
           (is (= "app\nvm3\n" (:out (rt/execute far "id -un; hostname")))))))))

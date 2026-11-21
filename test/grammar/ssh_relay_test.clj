@@ -51,6 +51,7 @@
      :nested3-sudo   [(cx/ssh-hop {:route :n1 :dest "n1" :opts o}) (cx/ssh-hop {:route :n2 :dest "n2"})
                       (cx/ssh-hop {:route :n3 :dest "n3"}) (cx/sudo-hop {})]
      :csh-direct     [(cx/ssh-hop {:route :n2c :dest "cshu@n2" :opts o :jump "n1"})]
+     :fish-direct    [(cx/ssh-hop {:route :n1 :dest "n1" :opts o}) (cx/ssh-hop {:route :n3f :dest "fishu@n3"})]
      :csh-stdin      [(cx/ssh-stdin-hop {:route :n2c :dest "cshu@n2" :opts o :jump "n1"})]
      :fish-stdin     [(cx/ssh-hop {:route :n1 :dest "n1" :opts o})
                       (cx/ssh-stdin-hop {:route :n3f :dest "fishu@n3"})]}))
@@ -62,7 +63,7 @@
   [k]
   (or (get @state k)
       (let [root (fx/sh-runtime! :root :dash [:sh :ssh])
-            rt (cx/chain-runtime root (get (chains (:config *lab*)) k))
+            rt (cx/chain-runtime root (cx/chain (get (chains (:config *lab*)) k)))
             v [rt (g/discover! rt {:modules mods})]]
         (swap! state assoc k v)
         v)))
@@ -73,8 +74,25 @@
 
 (deftest the-posix-words-probe-sorts-login-shells
   (when *lab*
-    (doseq [[k v] {:ssh :yes :ssh-jump :yes :csh-direct :no :csh-stdin :yes :fish-stdin :yes}]
+    (doseq [[k v] {:ssh :yes :ssh-jump :yes :csh-direct :no :fish-direct :no :csh-stdin :yes :fish-stdin :yes}]
       (is (= v (p/verdict (second (far! k)) :sh/posix-words)) (name k)))))
+
+(deftest raw-payloads-and-long-payloads-cross
+  (when *lab*
+    (testing "payload bytes ride inside the quoted words, not as octal: printf %s and python"
+      (doseq [k [:ssh-sudo :nested3-sudo :csh-stdin :fish-stdin]
+              s ["a\\\\b" "x\\';id;\\'" "'\"$`\\\n!*?~λ🚀" "-n"]]
+        (let [[far prof] (far! k)
+              prof (reduce #(p/declare-cap %1 %2 :no "test: raw encoders only") prof [:sh/double-quote])
+              res (g/realize! far prof [:str s])]
+          (is (= [:sh.str/printf :sh.lit/single] (:realization res)) (pr-str k s))
+          (is (true? (:ok? (:verified res))) (pr-str k s)))))
+    (testing "4-64 KB payloads through four hops"
+      (doseq [n [4096 65536]]
+        (let [s (apply str (take n (cycle "a'b\"$`\\\nλ🚀 ")))
+              res (trial :nested3-sudo s nil)]
+          (println "relay long payload" n "chars, program bytes" (get-in res [:constraints :bytes]))
+          (is (true? (:ok? (:verified res))) (str n)))))))
 
 (deftest chains-deliver-bytes-exactly
   (when *lab*
