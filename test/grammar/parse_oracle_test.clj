@@ -10,6 +10,7 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]
+            [clojure.java.shell]
             [clojure.string :as str]
             [grammar.fixtures :as fx]
             [grammar.lit :as lit]
@@ -68,3 +69,57 @@
       (is (= [s] (psh/words (lit/sh-single s))))
       (is (= [s] (psh/words (lit/sh-double s))))
       (is (= [s] (psh/words :bash (lit/sh-ansi-c s))) s))))
+
+;; ---------------------------------------------------------------- fish and tcsh, in the lab image
+
+(def ^:private lab-image "grammar-relay-lab:1")
+
+(def gen-quoted-text
+  "Texts biased to what the fish and csh models accept: single-quoted
+  words holding backslash runs, backslash-quote, $, !, newlines and
+  non-ASCII, glued with plain letters and blanks."
+  (gen/fmap #(apply str %)
+            (gen/vector (gen/frequency
+                         [[4 (gen/fmap #(str "'" (apply str %) "'")
+                                       (gen/vector (gen/elements ["a" "\\\\" "\\'" "\\" "$x" "!" "\n" "λ" " " "%" "\"" "`"]) 0 5))]
+                          [3 (gen/elements ["a" "b" " " "  " "-" "=" "%" "λ"])]
+                          [1 gen-piece]])
+                        1 6)))
+
+(def lab-shells?
+  "fish and tcsh run from the docker lab image (GRAMMAR_SSHD=1)."
+  (= "1" (System/getenv "GRAMMAR_SSHD")))
+
+(defn- container-argvs
+  "For each text, the argv the shell (fish or tcsh) in the lab image gives
+  `dump` + text, or nil when it fails. One container per batch: one
+  script per line, each line run by the shell from its own file."
+  [shell texts]
+  (let [scripts (map-indexed (fn [i t] [(str "/tmp/s" i) (str dump t)]) texts)
+        mk (apply str (for [[f t] scripts]
+                        (str "printf %s " (lit/sh-single t) " > " f "; ")))
+        run (apply str (for [[f _] scripts]
+                         (str "printf '\\036'; " shell " " f "; printf '\\037%s' $?; ")))
+        r (clojure.java.shell/sh "timeout" "120" "docker" "run" "--rm" lab-image "sh" "-c" (str mk run))]
+    (for [chunk (rest (str/split (:out r) #"\u001e" -1))]
+      (let [[body st] (str/split chunk #"\u001f" 2)]
+        (when (= "0" st) (mapv hex->str (str/split body #"\n" -1)))))))
+
+(defn- dialect-agreement
+  "[accepted agreed rows] for n generated texts in dialect against shell."
+  [dialect shell n]
+  (let [ts (concat (gen/sample gen-quoted-text n) (gen/sample gen-shell-text n))
+        accepted (filterv #(model-argv dialect %) ts)
+        real (container-argvs shell accepted)
+        rows (map vector accepted real)]
+    [(count accepted) (count (filter (fn [[t r]] (= (conj (model-argv dialect t) "") r)) rows))
+     (remove (fn [[t r]] (= (conj (model-argv dialect t) "") r)) rows)]))
+
+(deftest fish-and-tcsh-models-agree-with-the-real-shells
+  (if-not lab-shells?
+    (println "grammar.parse-oracle-test: fish/tcsh oracles skipped (GRAMMAR_SSHD=1 with" lab-image "built)")
+    (doseq [[dialect shell] [[:fish "fish"] [:csh "tcsh"]]]
+      (let [[acc agreed bad] (dialect-agreement dialect shell 400)]
+        (println "oracle" (name dialect) "accepted" acc "of 400, agreed" agreed)
+        (is (> acc 40) "the model must accept enough texts for agreement to mean something")
+        (is (= acc agreed) (pr-str (take 3 bad)))))))

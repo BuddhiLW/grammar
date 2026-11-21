@@ -106,6 +106,9 @@
         (#{\; \& \< \> \( \) \`} c) (refuse (str "operator or expansion " c) j)
         (#{\* \? \[ \{ \} \!} c) (refuse (str "unquoted " c) j)
         (and (#{\# \~} c) (= j i)) (refuse (str "unquoted " c " at word start") j)
+        ;; tcsh: # starts a comment anywhere it is unquoted, and =N / =-
+        ;; at a word start names the directory stack
+        (and (= dialect :csh) (#{\# \=} c)) (refuse (str "csh: unquoted " c) j)
         (and (= c \=) pure? first-word? (pos? (.length acc))) (refuse "assignment in command position" j)
         (= c \$) (if (and (= dialect :bash) (< (inc j) (count s)) (= \' (.charAt s (inc j))))
                    (let [[t k] (ansi-c-quoted s (+ j 2))] (recur k (.append acc ^String t) false))
