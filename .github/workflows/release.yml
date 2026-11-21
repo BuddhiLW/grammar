@@ -111,11 +111,28 @@ jobs:
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
         run: clojure -T:build deploy
 
-      # deploy is a no-op for a coordinate the registry already holds, and a
-      # green step is not proof of an upload: assert the effect before the tag
-      # claims it.
+      # A green deploy step is not proof of an upload: assert the effect
+      # before the tag claims it. Both the pom and the jar must answer 200.
+      # This is a curl HEAD, not `clojure -T:build verify-published`: in
+      # hive-build 0.3.1 that task's probe calls .openConnection on a
+      # java.net.URI, which throws, so it reports every registry as
+      # unreachable. Retries cover the CDN catching up after the upload.
       - name: Verify published
-        run: clojure -T:build verify-published
+        run: |
+          set -euo pipefail
+          VER=$(tr -d '[:space:]' < VERSION)
+          base="https://repo.clojars.org/io/github/buddhilw/grammar/$VER/grammar-$VER"
+          for ext in pom jar; do
+            code=000
+            for attempt in 1 2 3 4 5 6 7 8; do
+              code=$(curl -sS -o /dev/null -I --max-time 20 -w '%{http_code}' "$base.$ext" || true)
+              [ "$code" = 200 ] && break
+              echo "grammar-$VER.$ext: HTTP $code (attempt $attempt), retrying"
+              sleep 15
+            done
+            [ "$code" = 200 ] || { echo "grammar-$VER.$ext is not on Clojars (HTTP $code)" >&2; exit 1; }
+            echo "grammar-$VER.$ext: HTTP 200"
+          done
 
       - name: Tag
         run: |
