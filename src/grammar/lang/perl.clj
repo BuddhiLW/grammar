@@ -5,12 +5,9 @@
   "Perl as a target language: literal encoders, realizations, context
   wrappers and the probes behind every capability they rely on.
 
-  Exports data in exactly the shapes of grammar.realize and grammar.probe,
-  so an environment composes them explicitly:
-
-    (solve/make-env profile {:realizations (into realize/realizations realizations)
-                             :wrappers (into realize/wrappers wrappers)})
-    (probe/discover id run! (into probe/probes probes))
+  Exports data in exactly the shapes of grammar.realize and grammar.probe.
+  `module` bundles them for grammar.core/compose, and grammar.core/modules
+  includes it by default.
 
   Strings are bytes. A Perl literal here denotes the UTF-8 bytes of the
   intent's string as a byte string (every char < 256, no utf8 flag), and

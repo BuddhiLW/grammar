@@ -14,16 +14,13 @@
   wrappers      context emitters into and out of PHP: sh running php -r,
                 php eval, php running sh or python3 through proc_open,
                 python running php through subprocess.
-  probes        :interp/php, :php/first-class-callable, then one
-                function_exists probe per function the realizations and
-                wrappers call. Each needs :interp/php, so without php they
-                are skipped and stay :unknown.
+  probes        :interp/php, :php/first-class-callable, :php/proc-open-argv,
+                then one function_exists probe per function the realizations
+                and wrappers call. Each needs :interp/php, so without php
+                they are skipped and stay :unknown.
 
-  Nothing here is wired into grammar.core; compose explicitly:
-
-    (solve/make-env profile {:realizations (into realize/realizations realizations)
-                             :wrappers (into realize/wrappers wrappers)})
-    (probe/discover id run! (into probe/probes probes))"
+  `module` bundles the three for grammar.core/compose, and
+  grammar.core/modules includes it by default."
   (:require [clojure.string :as str]
             [grammar.candidate :as c]))
 

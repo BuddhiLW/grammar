@@ -3,7 +3,8 @@
 
 (ns grammar.lang.php-test
   "PHP as a target, against the real php binary. The registry and the
-  probe set are composed explicitly (grammar.core is not wired to PHP yet).
+  probe set are composed explicitly, so each test chooses exactly which
+  realizations exist.
 
   Restrictions are produced for real: a `php` wrapper script in the scratch
   bin dir runs the real binary with `-d disable_functions=...`, and the
