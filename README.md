@@ -148,6 +148,15 @@ the result is `:blocked-on-unknown` with `:needs` (what to probe) and
 `:would-select` (what would run). Every verdict keeps the ids of the evidence
 behind it: the probe script, exit status, stdout, stderr, or a declared reason.
 
+`plan-resolving!` probes the `:needs` of a blocked plan on demand and plans
+again. It probes each cap at most once per call: a probe skipped for an
+unproven prerequisite, or one that cannot run (a launch error, a timeout, an
+`execute` that throws), leaves its cap `:unknown` and is not retried. It
+returns `{:result :profile :passes :stopped}`, where `:stopped` is `:planned`,
+`:exhausted` (every need already probed), `:fixpoint` (a pass changed no
+verdict) or `:pass-bound` (opts `:max-passes`, default 64); a still-blocked
+result also carries `:unresolved`.
+
 ## Every result carries
 
 `:status`, `:realization` (ids, pre-order), `:stack`, `:constraints`
