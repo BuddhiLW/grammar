@@ -9,6 +9,7 @@
     (plan prof :sh [:write-file {:path \"/tmp/x\" :content \"hi\"}])
     (realize! rt prof [:write-file {:path \"/tmp/x\" :content \"hi\"}])"
   (:require [grammar.probe :as probe]
+            [grammar.profile :as p]
             [grammar.realize :as realize]
             [grammar.runtime :as rt]
             [grammar.solve :as solve]
@@ -120,6 +121,15 @@
                        :probe-langs (vec (distinct (map probe/probe-lang ps)))})))
     mine))
 
+(defn- probe-runner
+  "run! for the probes: rt/execute, except that an execute that throws is
+  a run that never happened, {:argv [] :error msg}, which judges :unknown."
+  [runtime]
+  (fn [script]
+    (try (rt/execute runtime script)
+         (catch Exception e
+           {:argv [] :error (str "runtime threw: " (.getName (class e)) ": " (ex-message e))}))))
+
 (defn discover!
   "Probe runtime with the probes of the language modules (opts :modules,
   default `modules`) written in the runtime's language, and return its
@@ -128,7 +138,7 @@
   :interp/sh, ...). See discovery-probes for the languages refused."
   ([runtime] (discover! runtime {}))
   ([runtime {mods :modules :or {mods modules}}]
-   (probe/discover (rt/runtime-id runtime) #(rt/execute runtime %)
+   (probe/discover (rt/runtime-id runtime) (probe-runner runtime)
                    (discovery-probes mods (rt/runtime-lang runtime)))))
 
 (defn env
@@ -186,25 +196,61 @@
 
 (defn resolve!
   "Probe, in runtime, every cap in caps that is still :unknown and has an
-  on-demand probe (e.g. :bin/git). Returns the enriched profile."
+  on-demand probe (e.g. :bin/git). Returns the enriched profile. A probe
+  whose run never happens (a launch error, a timeout, an execute that
+  throws) or whose prerequisites are unproven leaves its cap :unknown."
   [runtime profile caps]
   (probe/resolve-caps profile (rt/runtime-id runtime) (rt/runtime-lang runtime)
-                      #(rt/execute runtime %) caps))
+                      (probe-runner runtime) caps))
+
+(def default-max-passes
+  "Backstop on plan-resolving! passes. Each pass probes at least one cap
+  never probed before in the call, so the bound is reached only by an
+  intent whose :needs keep growing."
+  64)
+
+(defn- verdicts
+  "The cap states of profile: cap -> :yes or :no. Evidence ids are left
+  out on purpose, since a re-probed cap appends an id without changing what
+  is known, and so are :unknown entries, which state what an absent cap
+  does."
+  [profile]
+  (into {} (keep (fn [[cap {:keys [verdict]}]] (when (not= :unknown verdict) [cap verdict])))
+        (:caps profile)))
 
 (defn plan-resolving!
   "Plan intent for runtime; when the plan is :blocked-on-unknown, probe its
-  :needs on demand and plan again, until it stops changing.
-  Returns {:result Result :profile profile-after}."
+  :needs on demand and plan again. Each cap is probed at most once per call:
+  a probe skipped for an unproven prerequisite, or one that cannot run,
+  resolves to :unknown and is not retried. It stops when the plan is no
+  longer blocked (:planned), when every need was already probed in this
+  call (:exhausted), when a pass changed no verdict (:fixpoint, on cap
+  states, not on evidence), or after opts :max-passes plans (default
+  default-max-passes, :pass-bound).
+
+  Returns {:result Result :profile profile-after :passes n :stopped why};
+  when the Result is still blocked it also carries :unresolved, the needs
+  still :unknown. Other opts go to plan."
   ([runtime profile intent] (plan-resolving! runtime profile intent {}))
   ([runtime profile intent opts]
-   (loop [prof profile]
-     (let [res (plan prof (rt/runtime-lang runtime) intent opts)
-           prof' (if (= :blocked-on-unknown (:status res))
-                   (resolve! runtime prof (:needs res))
-                   prof)]
-       (if (= prof' prof)
-         {:result res :profile prof}
-         (recur prof'))))))
+   (let [max-passes (:max-passes opts default-max-passes)
+         opts (dissoc opts :max-passes)
+         lang (rt/runtime-lang runtime)]
+     (loop [prof profile tried #{} n 1]
+       (let [res (plan prof lang intent opts)
+             blocked? (= :blocked-on-unknown (:status res))
+             fresh (vec (remove tried (:needs res)))
+             done (fn [why prof]
+                    (cond-> {:result res :profile prof :passes n :stopped why}
+                      blocked? (assoc :unresolved (filterv #(= :unknown (p/verdict prof %)) (:needs res)))))]
+         (cond
+           (not blocked?) (done :planned prof)
+           (empty? fresh) (done :exhausted prof)
+           (<= max-passes n) (done :pass-bound prof)
+           :else (let [prof' (resolve! runtime prof fresh)]
+                   (if (= (verdicts prof') (verdicts prof))
+                     (done :fixpoint prof')
+                     (recur prof' (into tried fresh) (inc n))))))))))
 
 (defn realize!
   "Plan intent for runtime's language under profile, execute it, verify it.

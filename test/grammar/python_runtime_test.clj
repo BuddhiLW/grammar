@@ -155,6 +155,52 @@
           (is (not= :ok (:status res)) (pr-str intent))
           (is (nil? (:execution res))))))))
 
+(deftest write-blocking-hook-never-plans-python-writes
+  ;; Lab cell c14: a sitecustomize audit hook refuses every write-mode
+  ;; open and nothing else. :py/pathlib still holds; :py/open-write, which
+  ;; really writes, must not, so python is never chosen to write a file.
+  (let [site (site-dir! (audit-site [] true))
+        env {"LC_ALL" "C.UTF-8" "PYTHONPATH" site "PYTHONDONTWRITEBYTECODE" "1"}
+        dir (fx/tmp-dir! "grammar-c14-")
+        wf [:write-file {:path (str dir "/w") :content "c14"}]
+        py-writes? (fn [res] (some #{:py.write-file/pathlib} (:realization res)))]
+    (testing "python runtime with sh: write-file reroutes through sh and verifies"
+      (let [r (py-rt! :py-c14 [:sh] {"PYTHONPATH" site "PYTHONDONTWRITEBYTECODE" "1"})
+            prof (g/discover! r)
+            res (g/realize! r prof wf {:resolve true})]
+        (is (= :yes (p/verdict prof :py/pathlib)))
+        (is (= :no (p/verdict prof :py/open-write)))
+        (is (= :ok (:status res)) (pr-str (:needs res)))
+        (is (not (py-writes? res)) (pr-str (:realization res)))
+        (is (true? (:ok? (:verified res))) (pr-str (:execution res)))))
+    (testing "python runtime, no sh: python write-file is refused, nothing runs"
+      ;; What is left is python->php, blocked on an :interp/php no python
+      ;; probe answers: refused, never planned through pathlib.
+      (let [r (py-rt! :py-c14-nosh [] {"PYTHONPATH" site "PYTHONDONTWRITEBYTECODE" "1"})
+            res (g/realize! r (g/discover! r) wf {:resolve true})
+            py-only (g/plan (:profile-after res) :python wf {:stack [:python]})]
+        (is (not= :ok (:status res)))
+        (is (not (some #{:py.write-file/pathlib} (:would-select res))))
+        (is (nil? (:execution res)))
+        (is (= :unsatisfiable (:status py-only)))
+        (is (some #{(probe/evidence-id :py-c14-nosh :py/open-write)} (:evidence py-only)))))
+    (testing "rbash with python3 only: the planner never routes the write through python"
+      (let [r (rt/process-runtime {:id :rbash-c14 :argv ["/usr/bin/bash" "-r" "-c"]
+                                   :env (assoc env "PATH" (fx/bin-dir! [:python3]))})
+            prof (g/discover! r)
+            res (g/realize! r prof wf {:resolve true})]
+        (is (= :yes (p/verdict prof :interp/python3)))
+        (is (= :no (p/verdict prof :py/open-write)))
+        (is (not= :ok (:status res)))
+        (is (nil? (:execution res)))))
+    (testing "fs ops that need no write-mode open still run in python"
+      (let [r (py-rt! :py-c14-fs [] {"PYTHONPATH" site "PYTHONDONTWRITEBYTECODE" "1"})
+            prof (g/discover! r)]
+        (doseq [intent [[:ensure-dir {:path (str dir "/d/e")}] [:remove-file {:path (str dir "/absent")}]]]
+          (let [res (g/realize! r prof intent)]
+            (is (= :ok (:status res)) (pr-str intent))
+            (is (true? (:ok? (:verified res))) (pr-str intent (:execution res)))))))))
+
 (deftest str-and-write-file-plan-run-and-verify
   (let [out (fx/tmp-dir! "grammar-pyrt-")]
     (doseq [[id runtime] (select-keys @rts [:py-full :py-nosub :py-nosh])
